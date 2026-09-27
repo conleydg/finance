@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finance</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Finance</h1>
+  <nav>
+    <button data-tab="budget" class="active">Budget</button>
+    <button data-tab="transactions">Transactions</button>
+    <button data-tab="import">Import</button>
+  </nav>
+  <span id="model-status" class="pill"></span>
+</header>
+
+<main>
+  <section id="tab-budget">
+    <div class="toolbar">
+      <button id="prev-month" aria-label="Previous month">&larr;</button>
+      <select id="month"></select>
+      <button id="next-month" aria-label="Next month">&rarr;</button>
+    </div>
+    <div class="tiles">
+      <div class="tile"><span>Income</span><strong id="t-income"></strong></div>
+      <div class="tile"><span>Spent</span><strong id="t-spent"></strong></div>
+      <div class="tile"><span>Net</span><strong id="t-net"></strong></div>
+      <div class="tile"><span>Budgeted</span><strong id="t-budgeted"></strong></div>
+    </div>
+    <p id="uncat-note" class="note" hidden></p>
+    <table id="budget-table">
+      <thead><tr><th>Category</th><th class="num">Spent</th><th class="num">Budget</th><th class="bar-col"></th><th class="num">3-mo avg</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="hint">Click a budget amount to set it. Budgets repeat every month.</p>
+  </section>
+
+  <section id="tab-transactions" hidden>
+    <div class="toolbar">
+      <select id="tx-month"><option value="">All months</option></select>
+      <select id="tx-cat"><option value="">All categories</option><option value="__none">Uncategorized</option></select>
+      <input id="tx-q" type="search" placeholder="Search descriptions">
+      <button id="recat">Categorize uncategorized</button>
+    </div>
+    <p id="tx-summary" class="note"></p>
+    <table id="tx-table">
+      <thead><tr><th>Date</th><th>Description</th><th>Account</th><th class="num">Amount</th><th>Category</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-import" hidden>
+    <form id="import-form">
+      <label>Statement files (CSV or PDF)
+        <input type="file" name="file" accept=".csv,.pdf,.txt" multiple required>
+      </label>
+      <label>Account
+        <input name="account" list="accounts" placeholder="e.g. Chase Checking" required>
+        <datalist id="accounts"></datalist>
+      </label>
+      <label>Amount signs
+        <select name="sign">
+          <option value="auto">Detect automatically</option>
+          <option value="asis">Purchases are negative in the file</option>
+          <option value="flip">Purchases are positive in the file (Amex, Discover)</option>
+        </select>
+      </label>
+      <button type="submit">Import</button>
+    </form>
+    <div id="import-log"></div>
+    <h2>Past imports</h2>
+    <table id="imports-table">
+      <thead><tr><th>When</th><th>File</th><th>Account</th><th>Parser</th><th class="num">Found</th><th class="num">Added</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="hint">Everything is stored in <code>data/finance.db</code> on this Mac. PDFs and categories are read by the local Ollama model; nothing is sent anywhere else.</p>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
