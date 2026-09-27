@@ -33,16 +33,16 @@
       <select id="month" aria-label="Month"></select>
       <button id="next-month" class="round" aria-label="Next month">&#8250;</button>
       <div class="left-total">
-        <span>Left to spend in budgeted categories</span>
+        <span id="left-label">Left to spend in budgeted categories</span>
         <strong id="t-left"></strong>
       </div>
     </div>
     <p id="uncat-note" class="note" hidden></p>
     <div id="envelopes" class="envelopes"></div>
-    <div class="card">
+    <div class="card" id="loose-card">
       <div class="card-head">
-        <h2>Not budgeted yet</h2>
-        <span id="loose-total" class="muted"></span>
+        <h2>Other categories</h2>
+        <span class="muted">No spending this month. Click one to give it a budget.</span>
       </div>
       <div id="loose" class="chips"></div>
     </div>

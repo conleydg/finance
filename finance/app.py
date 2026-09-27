@@ -19,6 +19,15 @@ db.init()
 JOBS: dict[str, dict] = {}
 
 
+@app.middleware("http")
+async def no_stale_assets(request, call_next):
+    # The Dock app's Chrome window would otherwise keep showing an old page after updates.
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 def _run_import(job: dict, filename: str, data: bytes, account: str, sign: str) -> None:
     def progress(msg: str) -> None:
         job["message"] = msg

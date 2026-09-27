@@ -65,10 +65,11 @@ async function loadBudget() {
   $("#t-net").textContent = money(b.net);
   $("#t-net").className = b.net < 0 ? "neg" : "pos";
 
-  const envs = b.categories.filter((r) => r.budget != null);
-  const left = envs.reduce((s, r) => s + r.budget - r.spent, 0);
-  $("#t-left").textContent = envs.length ? money(left) : "No budgets yet";
-  $("#t-left").className = left < 0 ? "over" : "";
+  const budgeted = b.categories.filter((r) => r.budget != null);
+  const left = budgeted.reduce((s, r) => s + r.budget - r.spent, 0);
+  $("#left-label").textContent = budgeted.length ? "Left to spend in budgeted categories" : "Spent this month";
+  $("#t-left").textContent = money(budgeted.length ? left : b.spent);
+  $("#t-left").className = budgeted.length && left < 0 ? "over" : "";
 
   const note = $("#uncat-note");
   note.hidden = !b.uncategorized.count;
@@ -76,7 +77,18 @@ async function loadBudget() {
   const seeUncat = $("#see-uncat");
   if (seeUncat) seeUncat.onclick = (e) => { e.preventDefault(); $("#tx-cat").value = "__none"; $("#tx-month").value = b.month; showTab("transactions"); };
 
+  // Every category with a budget or with spending gets an envelope; budgeted ones first.
+  const envs = b.categories.filter((r) => r.budget != null || r.spent > 0)
+    .sort((x, y) => (y.budget != null) - (x.budget != null) || y.spent - x.spent);
   $("#envelopes").innerHTML = envs.map((r) => {
+    if (r.budget == null) {
+      return `<button class="env unset" data-cat="${r.category_id}" title="Click to set a monthly budget">
+        <div class="env-top"><span class="env-name">${esc(r.category)}</span><span class="env-of">no budget</span></div>
+        <div class="env-left">${money(r.spent)}</div>
+        <div class="env-label">spent &middot; <span class="env-set">Set a budget</span></div>
+        <div class="env-bar"><div style="width:0"></div></div>
+      </button>`;
+    }
     const rem = r.budget - r.spent;
     const cls = rem < 0 ? "over" : rem / r.budget < 0.15 ? "near" : "";
     const pct = r.budget ? Math.min(100, (r.spent / r.budget) * 100) : 100;
@@ -86,16 +98,11 @@ async function loadBudget() {
       <div class="env-label">${rem < 0 ? "over budget" : "left"}</div>
       <div class="env-bar"><div style="width:${pct}%"></div></div>
     </button>`;
-  }).join("") || `<div class="env-empty">No envelopes yet. Pick a category below and give it a monthly budget.</div>`;
+  }).join("") || `<div class="env-empty">No spending this month yet.</div>`;
 
-  const loose = b.categories.filter((r) => r.budget == null && r.spent > 0);
   const idle = b.categories.filter((r) => r.budget == null && !(r.spent > 0));
-  $("#loose-total").textContent = loose.length
-    ? `${money(loose.reduce((s, r) => s + r.spent, 0))} this month. Click one to give it an envelope.`
-    : "Click a category to give it an envelope.";
-  $("#loose").innerHTML =
-    loose.map((r) => `<button class="chip" data-cat="${r.category_id}">${esc(r.category)}<span>${money(r.spent)}</span></button>`).join("") +
-    idle.map((r) => `<button class="chip quiet" data-cat="${r.category_id}">${esc(r.category)}</button>`).join("");
+  $("#loose-card").hidden = !idle.length;
+  $("#loose").innerHTML = idle.map((r) => `<button class="chip quiet" data-cat="${r.category_id}">${esc(r.category)}</button>`).join("");
 
   const byId = Object.fromEntries(b.categories.map((r) => [r.category_id, r]));
   document.querySelectorAll("#envelopes [data-cat], #loose [data-cat]").forEach((el) =>
