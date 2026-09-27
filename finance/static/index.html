@@ -7,53 +7,72 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <h1>Finance</h1>
+<aside class="sidebar">
+  <div class="brand">Finance</div>
   <nav>
     <button data-tab="budget" class="active">Budget</button>
     <button data-tab="transactions">Transactions</button>
     <button data-tab="import">Import</button>
   </nav>
-  <span id="model-status" class="pill"></span>
-</header>
+  <div class="soon">
+    <div class="soon-label">Coming next</div>
+    <span>Retirement</span>
+    <span>College savings</span>
+    <span>Goals</span>
+  </div>
+  <div class="side-foot">
+    <span id="model-status"></span>
+    <span>Everything stays on this Mac</span>
+  </div>
+</aside>
 
 <main>
   <section id="tab-budget">
-    <div class="toolbar">
-      <button id="prev-month" aria-label="Previous month">&larr;</button>
-      <select id="month"></select>
-      <button id="next-month" aria-label="Next month">&rarr;</button>
-    </div>
-    <div class="tiles">
-      <div class="tile"><span>Income</span><strong id="t-income"></strong></div>
-      <div class="tile"><span>Spent</span><strong id="t-spent"></strong></div>
-      <div class="tile"><span>Net</span><strong id="t-net"></strong></div>
-      <div class="tile"><span>Budgeted</span><strong id="t-budgeted"></strong></div>
+    <div class="topline">
+      <button id="prev-month" class="round" aria-label="Previous month">&#8249;</button>
+      <select id="month" aria-label="Month"></select>
+      <button id="next-month" class="round" aria-label="Next month">&#8250;</button>
+      <div class="left-total">
+        <span>Left to spend in budgeted categories</span>
+        <strong id="t-left"></strong>
+      </div>
     </div>
     <p id="uncat-note" class="note" hidden></p>
-    <table id="budget-table">
-      <thead><tr><th>Category</th><th class="num">Spent</th><th class="num">Budget</th><th class="bar-col"></th><th class="num">3-mo avg</th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <p class="hint">Click a budget amount to set it. Budgets repeat every month.</p>
+    <div id="envelopes" class="envelopes"></div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Not budgeted yet</h2>
+        <span id="loose-total" class="muted"></span>
+      </div>
+      <div id="loose" class="chips"></div>
+    </div>
+    <div class="tiles">
+      <div class="card tile"><span>Income</span><strong id="t-income"></strong></div>
+      <div class="card tile"><span>Spent</span><strong id="t-spent"></strong></div>
+      <div class="card tile"><span>Kept</span><strong id="t-net"></strong></div>
+    </div>
   </section>
 
   <section id="tab-transactions" hidden>
+    <h1>Transactions</h1>
     <div class="toolbar">
-      <select id="tx-month"><option value="">All months</option></select>
-      <select id="tx-cat"><option value="">All categories</option><option value="__none">Uncategorized</option></select>
-      <input id="tx-q" type="search" placeholder="Search descriptions">
-      <button id="recat">Categorize uncategorized</button>
+      <select id="tx-month" aria-label="Month"><option value="">All months</option></select>
+      <select id="tx-cat" aria-label="Category"><option value="">All categories</option><option value="__none">Uncategorized</option></select>
+      <input id="tx-q" type="search" placeholder="Search descriptions" aria-label="Search descriptions">
+      <button id="recat" class="btn">Categorize uncategorized</button>
     </div>
-    <p id="tx-summary" class="note"></p>
-    <table id="tx-table">
-      <thead><tr><th>Date</th><th>Description</th><th>Account</th><th class="num">Amount</th><th>Category</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <p id="tx-summary" class="muted"></p>
+    <div class="card flush">
+      <table id="tx-table">
+        <thead><tr><th>Date</th><th>Description</th><th>Account</th><th class="num">Amount</th><th>Category</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="tab-import" hidden>
-    <form id="import-form">
+    <h1>Import statements</h1>
+    <form id="import-form" class="card">
       <label>Statement files (CSV or PDF)
         <input type="file" name="file" accept=".csv,.pdf,.txt" multiple required>
       </label>
@@ -68,17 +87,35 @@
           <option value="flip">Purchases are positive in the file (Amex, Discover)</option>
         </select>
       </label>
-      <button type="submit">Import</button>
+      <button type="submit" class="btn primary">Import</button>
     </form>
     <div id="import-log"></div>
     <h2>Past imports</h2>
-    <table id="imports-table">
-      <thead><tr><th>When</th><th>File</th><th>Account</th><th>Parser</th><th class="num">Found</th><th class="num">Added</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <p class="hint">Everything is stored in <code>data/finance.db</code> on this Mac. PDFs and categories are read by the local Ollama model; nothing is sent anywhere else.</p>
+    <div class="card flush">
+      <table id="imports-table">
+        <thead><tr><th>When</th><th>File</th><th>Account</th><th>Parser</th><th class="num">Found</th><th class="num">Added</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="muted small">Everything is stored in <code>data/finance.db</code> on this Mac. PDFs and categories are read by the local Ollama model; nothing is sent anywhere else.</p>
   </section>
 </main>
+
+<dialog id="budget-dialog">
+  <form method="dialog">
+    <h2 id="bd-title"></h2>
+    <p id="bd-hint" class="muted small"></p>
+    <label>Monthly budget
+      <input id="bd-amount" inputmode="decimal" autocomplete="off">
+    </label>
+    <div class="dialog-actions">
+      <button value="clear" id="bd-clear" class="btn">Remove envelope</button>
+      <span class="spacer"></span>
+      <button value="cancel" class="btn">Cancel</button>
+      <button value="save" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
 <script src="/static/app.js"></script>
 </body>
 </html>

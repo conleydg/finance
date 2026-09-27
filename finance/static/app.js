@@ -6,16 +6,17 @@ const api = async (path, opts = {}) => {
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
   return r.json();
 };
+const monthName = (m) => new Date(m + "-15").toLocaleDateString(undefined, { month: "long", year: "numeric" });
 const json = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 let categories = [];
 let months = [];
 
 // ---------- tabs ----------
-document.querySelectorAll("nav button").forEach((b) =>
+document.querySelectorAll(".sidebar nav button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 function showTab(name) {
-  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".sidebar nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll("main > section").forEach((s) => (s.hidden = s.id !== "tab-" + name));
   try { localStorage.setItem("tab", name); } catch {}
   ({ budget: loadBudget, transactions: loadTransactions, import: loadImports })[name]();
@@ -25,8 +26,8 @@ function showTab(name) {
 async function loadStatus() {
   const s = await api("/api/status");
   const el = $("#model-status");
-  el.textContent = s.model_ok ? `Local model: ${s.model.split(":")[0]}` : "Local model offline";
-  el.className = "pill " + (s.model_ok ? "ok" : "bad");
+  el.textContent = s.model_ok ? `Local model ready (${s.model.split(":")[0]})` : "Local model offline";
+  el.className = s.model_ok ? "ok" : "bad";
   $("#accounts").innerHTML = s.accounts.map((a) => `<option value="${esc(a.name)}">`).join("");
   return s;
 }
@@ -35,10 +36,10 @@ async function loadMeta() {
   const now = new Date().toISOString().slice(0, 7);
   const monthOpts = (months.includes(now) ? months : [now, ...months]);
   const cur = $("#month").value;
-  $("#month").innerHTML = monthOpts.map((m) => `<option>${m}</option>`).join("");
+  $("#month").innerHTML = monthOpts.map((m) => `<option value="${m}">${monthName(m)}</option>`).join("");
   $("#month").value = cur && monthOpts.includes(cur) ? cur : (months[0] || now);
   const txm = $("#tx-month").value;
-  $("#tx-month").innerHTML = `<option value="">All months</option>` + months.map((m) => `<option>${m}</option>`).join("");
+  $("#tx-month").innerHTML = `<option value="">All months</option>` + months.map((m) => `<option value="${m}">${monthName(m)}</option>`).join("");
   $("#tx-month").value = txm;
   const txc = $("#tx-cat").value;
   $("#tx-cat").innerHTML = `<option value="">All categories</option><option value="__none">Uncategorized</option>` +
@@ -63,34 +64,64 @@ async function loadBudget() {
   $("#t-spent").textContent = money(b.spent);
   $("#t-net").textContent = money(b.net);
   $("#t-net").className = b.net < 0 ? "neg" : "pos";
-  $("#t-budgeted").textContent = b.budgeted ? money(b.budgeted) : "not set";
+
+  const envs = b.categories.filter((r) => r.budget != null);
+  const left = envs.reduce((s, r) => s + r.budget - r.spent, 0);
+  $("#t-left").textContent = envs.length ? money(left) : "No budgets yet";
+  $("#t-left").className = left < 0 ? "over" : "";
+
   const note = $("#uncat-note");
   note.hidden = !b.uncategorized.count;
   note.innerHTML = `${b.uncategorized.count} uncategorized transactions (${money(b.uncategorized.amount)}) aren't counted yet. <a href="#" id="see-uncat">Review them</a>`;
   const seeUncat = $("#see-uncat");
   if (seeUncat) seeUncat.onclick = (e) => { e.preventDefault(); $("#tx-cat").value = "__none"; $("#tx-month").value = b.month; showTab("transactions"); };
-  $("#budget-table tbody").innerHTML = b.categories.map((r) => {
-    const pct = r.budget ? Math.min(100, (r.spent / r.budget) * 100) : 0;
-    const over = r.budget && r.spent > r.budget;
-    return `<tr class="${r.spent || r.budget ? "" : "dim"}">
-      <td><a href="#" data-cat="${r.category_id}">${esc(r.category)}</a></td>
-      <td class="num ${over ? "neg" : ""}">${money(r.spent)}</td>
-      <td class="num"><button class="linkish" data-budget="${r.category_id}" data-val="${r.budget ?? ""}">${r.budget != null ? money(r.budget) : "set"}</button></td>
-      <td class="bar-col">${r.budget ? `<div class="bar"><div class="${over ? "over" : ""}" style="width:${pct}%"></div></div>
-        <small>${over ? money(r.spent - r.budget) + " over" : money(r.budget - r.spent) + " left"}</small>` : ""}</td>
-      <td class="num muted">${r.avg3 ? money(r.avg3) : ""}</td></tr>`;
-  }).join("");
-  document.querySelectorAll("[data-budget]").forEach((btn) => btn.onclick = async () => {
-    const v = prompt("Monthly budget for this category (blank to clear)", btn.dataset.val);
-    if (v === null) return;
-    const n = v.trim() === "" ? null : parseFloat(v.replace(/[$,]/g, ""));
-    if (n !== null && isNaN(n)) return alert("Enter a number");
-    await api(`/api/budget/${btn.dataset.budget}`, json("PUT", { monthly_amount: n }));
+
+  $("#envelopes").innerHTML = envs.map((r) => {
+    const rem = r.budget - r.spent;
+    const cls = rem < 0 ? "over" : rem / r.budget < 0.15 ? "near" : "";
+    const pct = r.budget ? Math.min(100, (r.spent / r.budget) * 100) : 100;
+    return `<button class="env ${cls}" data-cat="${r.category_id}" title="Spent ${money(r.spent)}. Click to change the budget.">
+      <div class="env-top"><span class="env-name">${esc(r.category)}</span><span class="env-of">of ${money(r.budget)}</span></div>
+      <div class="env-left">${money(Math.abs(rem))}</div>
+      <div class="env-label">${rem < 0 ? "over budget" : "left"}</div>
+      <div class="env-bar"><div style="width:${pct}%"></div></div>
+    </button>`;
+  }).join("") || `<div class="env-empty">No envelopes yet. Pick a category below and give it a monthly budget.</div>`;
+
+  const loose = b.categories.filter((r) => r.budget == null && r.spent > 0);
+  const idle = b.categories.filter((r) => r.budget == null && !(r.spent > 0));
+  $("#loose-total").textContent = loose.length
+    ? `${money(loose.reduce((s, r) => s + r.spent, 0))} this month. Click one to give it an envelope.`
+    : "Click a category to give it an envelope.";
+  $("#loose").innerHTML =
+    loose.map((r) => `<button class="chip" data-cat="${r.category_id}">${esc(r.category)}<span>${money(r.spent)}</span></button>`).join("") +
+    idle.map((r) => `<button class="chip quiet" data-cat="${r.category_id}">${esc(r.category)}</button>`).join("");
+
+  const byId = Object.fromEntries(b.categories.map((r) => [r.category_id, r]));
+  document.querySelectorAll("#envelopes [data-cat], #loose [data-cat]").forEach((el) =>
+    el.onclick = () => editBudget(byId[el.dataset.cat]));
+}
+
+function editBudget(r) {
+  const dlg = $("#budget-dialog");
+  $("#bd-title").textContent = r.category;
+  $("#bd-hint").textContent = `Spent ${money(r.spent)} this month` + (r.avg3 ? `, about ${money(r.avg3)} a month lately.` : ".");
+  $("#bd-amount").value = r.budget ?? (r.avg3 ? Math.ceil(r.avg3 / 10) * 10 : "");
+  $("#bd-clear").hidden = r.budget == null;
+  dlg.returnValue = "";
+  dlg.onclose = async () => {
+    if (dlg.returnValue === "cancel" || !dlg.returnValue) return;
+    let n = null;
+    if (dlg.returnValue === "save") {
+      const raw = $("#bd-amount").value.trim();
+      if (raw === "") n = null;
+      else { n = parseFloat(raw.replace(/[$,]/g, "")); if (isNaN(n)) return alert("Enter a number"); }
+    }
+    await api(`/api/budget/${r.category_id}`, json("PUT", { monthly_amount: n }));
     loadBudget();
-  });
-  document.querySelectorAll("[data-cat]").forEach((a) => a.onclick = (e) => {
-    e.preventDefault(); $("#tx-cat").value = a.dataset.cat; $("#tx-month").value = b.month; showTab("transactions");
-  });
+  };
+  dlg.showModal();
+  $("#bd-amount").select();
 }
 $("#month").onchange = loadBudget;
 const stepMonth = (d) => { const s = $("#month"); const i = s.selectedIndex - d; if (i >= 0 && i < s.options.length) { s.selectedIndex = i; loadBudget(); } };
@@ -190,3 +221,7 @@ async function loadImports() {
   try { tab = localStorage.getItem("tab") || tab; } catch {}
   showTab(s.transactions ? tab : "import");
 })();
+// Enter in the amount field saves (the form's first button is "Remove").
+$("#bd-amount").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("#budget-dialog").close("save"); }
+});

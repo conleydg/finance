@@ -90,8 +90,7 @@ def connect() -> sqlite3.Connection:
 def init() -> None:
     with connect() as con:
         con.executescript(SCHEMA)
-        if not con.execute("SELECT 1 FROM categories LIMIT 1").fetchone():
-            con.executemany("INSERT INTO categories(name, kind) VALUES (?, ?)", DEFAULT_CATEGORIES)
+        con.executemany("INSERT OR IGNORE INTO categories(name, kind) VALUES (?, ?)", DEFAULT_CATEGORIES)
 
 
 def account_id(con: sqlite3.Connection, name: str) -> int:
