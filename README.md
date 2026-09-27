@@ -11,6 +11,12 @@ A personal finance app that runs entirely on this Mac. Import bank and card stat
 ./start.sh          # http://127.0.0.1:8770
 ```
 
+Or build a Dock app that starts the server if needed and opens it in its own window:
+
+```bash
+macos/make_app.sh   # creates ~/Applications/Finance.app; drag it to the Dock
+```
+
 First-time setup:
 
 ```bash
