@@ -49,7 +49,7 @@
       <div id="loose" class="chips"></div>
     </div>
     <div class="tiles">
-      <div class="card tile"><span>Income</span><strong id="t-income"></strong></div>
+      <button class="card tile tile-btn" id="income-tile"><span>Income</span><strong id="t-income"></strong><em>What counts?</em></button>
       <div class="card tile"><span>Spent</span><strong id="t-spent"></strong></div>
       <div class="card tile"><span>Kept</span><strong id="t-net"></strong></div>
     </div>
@@ -107,32 +107,24 @@
     <h1>Import statements</h1>
     <div id="dropzone" class="dropzone">
       <div class="drop-title">Drop statements here</div>
-      <div class="muted small">CSV or PDF, as many as you like, from any mix of accounts. Overlapping statements are fine.</div>
+      <div class="muted small">CSV or PDF, as many as you like, from any mix of accounts. Overlapping and balance-only statements are fine. The local model reads each one and you confirm the account before anything is saved.</div>
       <label class="btn">Choose files<input id="file-input" type="file" accept=".csv,.pdf,.txt" multiple hidden></label>
     </div>
-    <div id="queue" class="card" hidden>
-      <div class="queue-all">
-        <label>Account for all files
-          <input id="all-account" list="accounts" placeholder="e.g. Fidelity 401(k)">
-        </label>
-        <label>Type
-          <select id="all-kind"></select>
-        </label>
-        <label>Amount signs
-          <select id="all-sign">
+    <div id="review" hidden>
+      <div class="review-head">
+        <h2 id="review-title">Reading statements</h2>
+        <label class="small muted">Amount signs
+          <select id="review-sign">
             <option value="auto">Detect automatically</option>
-            <option value="asis">Money out is negative in the file</option>
-            <option value="flip">Purchases are positive in the file (Amex, Discover)</option>
+            <option value="asis">Money out is negative in the files</option>
+            <option value="flip">Purchases are positive in the files (Amex, Discover)</option>
           </select>
         </label>
       </div>
-      <table id="queue-table">
-        <thead><tr><th>File</th><th>Account</th><th>Type</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
+      <div id="review-list" class="review-list"></div>
       <div class="queue-actions">
-        <button id="queue-clear" class="btn">Clear</button>
-        <button id="queue-go" class="btn primary">Import</button>
+        <button id="review-cancel" class="btn">Cancel</button>
+        <button id="review-save" class="btn primary" disabled>Save</button>
       </div>
     </div>
     <datalist id="accounts"></datalist>
@@ -179,6 +171,18 @@
       <button value="cancel" class="btn" formnovalidate>Cancel</button>
       <button value="save" class="btn primary">Save</button>
     </div>
+  </form>
+</dialog>
+<dialog id="income-dialog" class="wide-dialog">
+  <form method="dialog">
+    <h2 id="inc-title">Income</h2>
+    <p class="muted small">Money in is only counted as income when its category is Income. Change a category here and it's remembered for that payer next time.</p>
+    <h3>Counted as income <span id="inc-counted-total" class="muted"></span></h3>
+    <table id="inc-counted"><tbody></tbody></table>
+    <h3>Money in that isn't counted <span id="inc-other-total" class="muted"></span></h3>
+    <p class="muted small">Transfers between your own accounts and refunds belong here. Paychecks, side income or interest don't.</p>
+    <table id="inc-other"><tbody></tbody></table>
+    <div class="dialog-actions"><span class="spacer"></span><button value="close" class="btn primary">Done</button></div>
   </form>
 </dialog>
 <dialog id="balance-dialog">

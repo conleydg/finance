@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import accounts, assistant, categorize, db, goals, importers, llm
+from . import accounts, assistant, categorize, db, goals, identify, importers, llm
 
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="Finance", docs_url=None, redoc_url=None)
@@ -102,6 +102,153 @@ def _run_import(job: dict, filename: str, data: bytes, account: str, sign: str, 
         job.update(status="error", message=f"{type(e).__name__}: {e}")
 
 
+# ---------- staged import: read and identify first, save after review ----------
+
+STAGED: dict[str, dict] = {}
+
+
+def _item_view(it: dict) -> dict:
+    return {k: v for k, v in it.items() if k not in ("parsed", "data")}
+
+
+def _stage_one(it: dict) -> None:
+    try:
+        it["message"] = "Reading"
+        name = it["filename"]
+        parsed = importers.parse_pdf(it.pop("data"), lambda m: it.update(message=m)) if name.lower().endswith(".pdf") \
+            else importers.parse_csv(it.pop("data"))
+        it["message"] = "Working out which account this is"
+        ident = identify.identify(parsed, name)
+        contrib = identify.contributions(parsed)
+        with db.connect() as con:
+            m = identify.match(con, ident)
+            known = con.execute("SELECT contributing FROM accounts WHERE id = ?", (m["account_id"],)).fetchone() \
+                if m["account_id"] else None
+        qs = identify.questions(ident, parsed, contrib, m)
+        if known and known["contributing"] is not None:
+            qs = [q for q in qs if q["id"] != "contributing"]      # already answered for this account
+        it.update(parsed=parsed, ident=ident, contributions=contrib, match=m, questions=qs,
+                  summary=identify.summary(ident, parsed, contrib), suggested_name=identify.suggested_name(ident),
+                  period_start=parsed.period_start, period_end=parsed.period_end,
+                  ending_balance=parsed.ending_balance, transactions=len(parsed.txns), status="ready", message="")
+    except importers.ImportError_ as e:
+        it.update(status="error", message=str(e))
+    except Exception as e:
+        it.update(status="error", message=f"{type(e).__name__}: {e}")
+
+
+@app.post("/api/stage")
+async def stage(files: list[UploadFile] = File(...)):
+    batch_id = uuid.uuid4().hex[:12]
+    items = []
+    for i, f in enumerate(files):
+        items.append({"id": i, "filename": f.filename or f"file{i}", "status": "waiting", "message": "Waiting",
+                      "data": await f.read()})
+    batch = STAGED[batch_id] = {"id": batch_id, "items": items, "status": "reading"}
+
+    def run():
+        for it in items:
+            it["status"] = "reading"
+            _stage_one(it)
+        batch["status"] = "ready"
+    threading.Thread(target=run, daemon=True).start()
+    return {"id": batch_id, "status": batch["status"], "items": [_item_view(i) for i in items]}
+
+
+@app.get("/api/stage/{batch_id}")
+def stage_status(batch_id: str):
+    b = STAGED.get(batch_id)
+    if not b:
+        raise HTTPException(404, "That import batch is gone (the app was restarted). Drop the files again.")
+    return {"id": b["id"], "status": b["status"], "items": [_item_view(i) for i in b["items"]]}
+
+
+class NewAccount(BaseModel):
+    name: str
+    kind: str = "checking"
+    institution: str | None = None
+    last4: str | None = None
+    subtype: str | None = None
+
+
+class Decision(BaseModel):
+    id: int
+    skip: bool = False
+    account_id: int | None = None
+    new_account: NewAccount | None = None
+    contributing: int | None = None      # 1, 0 or None
+    balance_date: str | None = None
+    sign: str = "auto"
+
+
+class Commit(BaseModel):
+    items: list[Decision]
+
+
+@app.post("/api/stage/{batch_id}/commit")
+def stage_commit(batch_id: str, body: Commit):
+    b = STAGED.get(batch_id)
+    if not b:
+        raise HTTPException(404, "That import batch is gone (the app was restarted). Drop the files again.")
+    by_id = {it["id"]: it for it in b["items"]}
+    job_id = uuid.uuid4().hex[:12]
+    job = JOBS[job_id] = {"id": job_id, "status": "running", "message": "Saving", "results": []}
+
+    def run():
+        created: dict[str, int] = {}     # the same new account named on several files is created once
+        any_budget = False
+        try:
+            for d in body.items:
+                it = by_id.get(d.id)
+                res = {"id": d.id, "filename": it["filename"] if it else "?"}
+                job["results"].append(res)
+                if not it or it.get("status") != "ready" or d.skip:
+                    res["not_imported"] = True
+                    continue
+                job["message"] = f"Saving {it['filename']}"
+                parsed = it["parsed"]
+                if d.balance_date and not parsed.period_end:
+                    parsed.period_end = importers.parse_date(d.balance_date)
+                with db.connect() as con:
+                    if d.account_id:
+                        acct = d.account_id
+                    elif d.new_account:
+                        na = d.new_account
+                        key = (na.name.strip().lower(), na.institution or "", na.last4 or "")
+                        acct = created.get(str(key)) or db.create_account(con, na.name, na.kind, na.institution,
+                                                                           na.last4, na.subtype)
+                        created[str(key)] = acct
+                    else:
+                        res["error"] = "No account chosen"
+                        continue
+                    a = con.execute("SELECT * FROM accounts WHERE id = ?", (acct,)).fetchone()
+                    # Fill in identity details the account doesn't have yet.
+                    ident = it.get("ident") or {}
+                    con.execute("UPDATE accounts SET institution = coalesce(institution, ?), last4 = coalesce(last4, ?), "
+                                "subtype = coalesce(subtype, ?) WHERE id = ?",
+                                (ident.get("institution"), ident.get("last4"), ident.get("subtype"), acct))
+                    contributing = 1 if it["contributions"]["count"] else d.contributing
+                    if contributing is not None and a["kind"] in db.INVEST_KINDS:
+                        con.execute("UPDATE accounts SET contributing = ? WHERE id = ?", (contributing, acct))
+                    sign = d.sign
+                    if a["kind"] in db.INVEST_KINDS and sign == "auto":
+                        sign = "asis"
+                    parsed.txns, flipped = importers.apply_sign(parsed.txns, sign)
+                    res.update(_save(con, acct, it["filename"], parsed), flipped=flipped, account=a["name"],
+                               account_kind=a["kind"], period_start=parsed.period_start,
+                               period_end=parsed.period_end, ending_balance=parsed.ending_balance,
+                               found=len(parsed.txns))
+                    any_budget |= a["kind"] not in db.INVEST_KINDS
+                it["status"] = "saved"
+            if any_budget:
+                job["categorize"] = categorize.categorize_pending(lambda m: job.update(message=m))
+            job["status"] = "done"
+        except Exception as e:
+            job.update(status="error", message=f"{type(e).__name__}: {e}")
+    threading.Thread(target=run, daemon=True).start()
+    return job
+
+
 @app.get("/")
 def index():
     # Version the asset URLs so a browser can never pair a new page with an old script.
@@ -116,7 +263,7 @@ def index():
 def status():
     with db.connect() as con:
         n = con.execute("SELECT count(*) FROM transactions").fetchone()[0]
-        accounts = [dict(r) for r in con.execute("SELECT id, name, kind FROM accounts ORDER BY name")]
+        accounts = [dict(r) for r in con.execute(f"SELECT {db.ACCOUNT_COLS} FROM accounts ORDER BY name")]
     return {"model": llm.MODEL, "model_ok": llm.available(), "transactions": n, "accounts": accounts,
             "demo": db.DATA_DIR.name == "data-demo"}
 
@@ -289,6 +436,22 @@ def budget(month: str | None = None):
             "categories": rows}
 
 
+@app.get("/api/income")
+def income(month: str):
+    """What counts as income this month, and money that came in but isn't counted (so it can be fixed)."""
+    base = ("SELECT t.id, t.date, t.description, t.amount, t.category_id, t.category_source, c.name AS category, "
+            "c.kind AS category_kind, a.name AS account FROM transactions t JOIN accounts a ON a.id = t.account_id "
+            "LEFT JOIN categories c ON c.id = t.category_id "
+            f"WHERE t.date LIKE ? AND t.account_id IN {db.BUDGET_ACCOUNTS} ")
+    with db.connect() as con:
+        counted = [dict(r) for r in con.execute(base + "AND c.kind = 'income' ORDER BY t.amount DESC", (f"{month}-%",))]
+        other = [dict(r) for r in con.execute(
+            base + "AND t.amount > 0 AND (c.kind IS NULL OR c.kind != 'income') ORDER BY t.amount DESC", (f"{month}-%",))]
+    return {"month": month, "counted": counted, "not_counted": other,
+            "counted_total": round(sum(r["amount"] for r in counted), 2),
+            "not_counted_total": round(sum(r["amount"] for r in other), 2)}
+
+
 class BudgetSet(BaseModel):
     monthly_amount: float | None
 
@@ -395,6 +558,10 @@ def list_accounts():
 class AccountIn(BaseModel):
     name: str | None = None
     kind: str | None = None
+    institution: str | None = None
+    last4: str | None = None
+    subtype: str | None = None
+    contributing: int | None = None
 
 
 @app.patch("/api/accounts/{account_id}")
@@ -405,10 +572,10 @@ def edit_account(account_id: int, a: AccountIn):
                 raise HTTPException(400, f"kind must be one of {', '.join(db.ACCOUNT_KINDS)}")
             con.execute("UPDATE accounts SET kind = ? WHERE id = ?", (a.kind, account_id))
         if a.name and a.name.strip():
-            try:
-                con.execute("UPDATE accounts SET name = ? WHERE id = ?", (a.name.strip(), account_id))
-            except Exception:
-                raise HTTPException(400, "Another account already has that name")
+            con.execute("UPDATE accounts SET name = ? WHERE id = ?", (a.name.strip(), account_id))
+        for col in ("institution", "last4", "subtype", "contributing"):
+            if col in a.model_fields_set:
+                con.execute(f"UPDATE accounts SET {col} = ? WHERE id = ?", (getattr(a, col), account_id))
     return {"ok": True}
 
 

@@ -104,7 +104,7 @@ def make_401k_pdf(path: Path, period: str, begin: str, end: str, rows) -> None:
     from reportlab.pdfgen import canvas
     c = canvas.Canvas(str(path), pagesize=letter)
     y = 740
-    for line in ["Example Retirement Services", "Example Corp 401(k) Plan", period,
+    for line in ["Example Retirement Services", "Example Corp 401(k) Plan", "Account ending in 4821", period,
                  f"Beginning Balance ${begin}", f"Ending Balance ${end}", "", "ACCOUNT ACTIVITY"]:
         c.drawString(50, y, line)
         y -= 18
@@ -112,6 +112,28 @@ def make_401k_pdf(path: Path, period: str, begin: str, end: str, rows) -> None:
         c.drawString(50, y, d)
         c.drawString(140, y, desc)
         c.drawRightString(540, y, amt)
+        y -= 18
+    c.save()
+
+
+# Balance-only statements: two accounts that would both be called "IRA", told apart by number.
+BALANCE_ONLY = [
+    ("ira_a_2026-06.pdf", ["Example Brokerage", "Traditional IRA", "Account number: XXXX-3307",
+                           "Total Account Value as of 06/30/2026: $52,310.44"]),
+    ("ira_b_2026-06.pdf", ["Example Brokerage", "Traditional IRA", "Account number: XXXX-9150",
+                           "Total Account Value as of 06/30/2026: $8,120.00"]),
+    ("ira_a_2026-09.pdf", ["Example Brokerage", "Traditional IRA", "Account number: XXXX-3307",
+                           "Total Account Value as of 09/30/2026: $53,904.12"]),
+]
+
+
+def make_text_pdf(path: Path, lines: list[str]) -> None:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    c = canvas.Canvas(str(path), pagesize=letter)
+    y = 740
+    for line in lines:
+        c.drawString(50, y, line)
         y -= 18
     c.save()
 
@@ -124,6 +146,8 @@ def main() -> None:
     make_pdf(SAMPLES / "card_statement.pdf")
     for name, period, begin, end, rows in (K401_A, K401_B):
         make_401k_pdf(SAMPLES / name, period, begin, end, rows)
+    for name, lines in BALANCE_ONLY:
+        make_text_pdf(SAMPLES / name, lines)
 
 
 if __name__ == "__main__":

@@ -116,6 +116,27 @@ async function loadBudget() {
     el.onclick = () => editBudget(byId[el.dataset.cat]));
 }
 
+async function showIncome() {
+  const month = $("#month").value;
+  const inc = await api(`/api/income?month=${month}`);
+  const incomeCat = categories.find((c) => c.kind === "income");
+  $("#inc-title").textContent = `Income in ${monthName(month)}`;
+  $("#inc-counted-total").textContent = money(inc.counted_total);
+  $("#inc-other-total").textContent = money(inc.not_counted_total);
+  const opts = (sel) => categories.map((c) => `<option value="${c.id}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+  const row = (r, counted) => `<tr><td class="nowrap">${new Date(r.date + "T12:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })}</td><td class="desc" title="${esc(r.description)}">${esc(r.description)}</td>
+    <td class="muted">${esc(r.account)}</td><td class="num pos">${money(r.amount)}</td>
+    <td>${counted ? `<select data-inc="${r.id}" aria-label="Category">${opts(r.category_id)}</select>`
+      : `<span class="muted small">${esc(r.category || "Uncategorized")}</span> <button type="button" class="btn" data-count="${r.id}">Count as income</button>`}</td></tr>`;
+  $("#inc-counted tbody").innerHTML = inc.counted.map((r) => row(r, true)).join("") || `<tr><td class="muted">Nothing counted as income this month.</td></tr>`;
+  $("#inc-other tbody").innerHTML = inc.not_counted.map((r) => row(r, false)).join("") || `<tr><td class="muted">No other money came in.</td></tr>`;
+  const set = async (id, cat) => { await api(`/api/transactions/${id}`, json("PATCH", { category_id: cat, remember: true })); showIncome(); loadBudget(); };
+  document.querySelectorAll("[data-count]").forEach((b) => b.onclick = () => set(+b.dataset.count, incomeCat.id));
+  document.querySelectorAll("[data-inc]").forEach((sel) => sel.onchange = () => set(+sel.dataset.inc, +sel.value));
+  if (!$("#income-dialog").open) $("#income-dialog").showModal();
+}
+$("#income-tile").onclick = showIncome;
+
 function editBudget(r) {
   const dlg = $("#budget-dialog");
   $("#bd-title").textContent = r.category;
@@ -180,44 +201,163 @@ $("#recat").onclick = async () => {
 };
 function flash(msg) { $("#tx-summary").textContent = msg; }
 
-// ---------- import ----------
-let queue = [];   // [{file, account, kind}]
+// ---------- import: drop, let the model read, review, save ----------
+let batch = null;          // {id, items}
+let decisions = {};        // item id -> {choice: "acct:<id>"|"new"|"skip", newAcct, contributing, balanceDate}
+let accountList = [];
 
-function addFiles(files) {
+async function addFiles(files) {
   const ok = [...files].filter((f) => /\.(csv|pdf|txt)$/i.test(f.name));
   if (!ok.length) return alert("Only CSV and PDF statements can be imported.");
-  const acct = $("#all-account").value.trim();
-  for (const f of ok) queue.push({ file: f, account: acct, kind: kindFor(acct) || $("#all-kind").value });
-  renderQueue();
+  if (batch && batch.items.some((i) => i.status === "reading" || i.status === "waiting"))
+    return alert("Still reading the last batch. Drop these again when it's done.");
+  const fd = new FormData();
+  ok.forEach((f) => fd.append("files", f));
+  accountList = (await api("/api/status")).accounts;
+  batch = await api("/api/stage", { method: "POST", body: fd });
+  decisions = {};
+  $("#review").hidden = false;
+  renderReview();
+  pollBatch();
 }
-const kindFor = (name) => knownAccounts[(name || "").trim().toLowerCase()];
 
-function renderQueue() {
-  $("#queue").hidden = !queue.length;
-  $("#queue-table tbody").innerHTML = queue.map((q, i) => `<tr>
-    <td title="${esc(q.file.name)}">${esc(q.file.name)}</td>
-    <td><input data-qa="${i}" list="accounts" value="${esc(q.account)}" placeholder="Account name" aria-label="Account for ${esc(q.file.name)}"></td>
-    <td><select data-qk="${i}" aria-label="Account type">${kindOptions(q.kind)}</select></td>
-    <td><button class="linkish neg" data-qx="${i}" aria-label="Remove ${esc(q.file.name)}">Remove</button></td></tr>`).join("");
-  document.querySelectorAll("[data-qa]").forEach((el) => el.oninput = () => {
-    const q = queue[el.dataset.qa]; q.account = el.value;
-    const k = kindFor(el.value);
-    if (k) { q.kind = k; el.closest("tr").querySelector("select").value = k; }
+async function pollBatch() {
+  while (batch && batch.status !== "ready") {
+    await new Promise((r) => setTimeout(r, 1200));
+    if (!batch) return;
+    batch = await api(`/api/stage/${batch.id}`);
+    renderReview();
+  }
+}
+
+const acctLabel = (a) => [a.name, a.institution && !a.name.includes(a.institution) ? a.institution : "",
+  a.last4 && !a.name.includes(a.last4) ? `...${a.last4}` : ""].filter(Boolean).join(" · ");
+
+function decisionFor(it) {
+  if (!decisions[it.id] && it.status === "ready") {
+    const m = it.match || {};
+    decisions[it.id] = {
+      choice: m.account_id ? `acct:${m.account_id}` : m.confidence === "ambiguous" ? "" : "new",
+      newAcct: { name: it.suggested_name, kind: it.ident.account_type || "checking", institution: it.ident.institution || "",
+                 last4: it.ident.last4 || "", subtype: it.ident.subtype || "" },
+      contributing: null, balanceDate: "",
+    };
+    // A second file for the same new account joins the first one's choice.
+    for (const other of batch.items) {
+      const d = decisions[other.id];
+      if (other.id !== it.id && d?.choice === "new" && it.ident.last4 && d.newAcct.last4 === it.ident.last4 &&
+          (d.newAcct.institution || "") === (it.ident.institution || "")) decisions[it.id].newAcct = d.newAcct;
+    }
+  }
+  return decisions[it.id];
+}
+
+function renderReview() {
+  if (!batch) { $("#review").hidden = true; return; }
+  const reading = batch.items.filter((i) => i.status === "waiting" || i.status === "reading").length;
+  $("#review-title").textContent = reading ? `Reading statements (${batch.items.length - reading} of ${batch.items.length} done)`
+    : `Review ${batch.items.length} statement${batch.items.length === 1 ? "" : "s"}`;
+  // Keep focus and typing intact: only re-render items whose state changed.
+  for (const it of batch.items) {
+    let el = document.getElementById(`ritem-${it.id}`);
+    const key = `${it.status}|${it.message}`;
+    if (el && el.dataset.key === key) continue;
+    const html = reviewItemHtml(it);
+    if (!el) { el = document.createElement("div"); el.id = `ritem-${it.id}`; $("#review-list").append(el); }
+    el.dataset.key = key;
+    el.className = "ritem";
+    el.innerHTML = html;
+    wireItem(it, el);
+  }
+  const ready = batch.items.filter((i) => i.status === "ready");
+  $("#review-save").disabled = !!reading || !ready.length;
+}
+
+function reviewItemHtml(it) {
+  if (it.status !== "ready") {
+    const err = it.status === "error";
+    return `<div class="ritem-top"><span class="ritem-file">${esc(it.filename)}</span></div>
+      <div class="ritem-status ${err ? "neg" : ""}">${esc(it.status === "saved" ? "Saved" : it.message || "Waiting")}</div>`;
+  }
+  const d = decisionFor(it), m = it.match || {};
+  const opts = accountList.map((a) => `<option value="acct:${a.id}" ${d.choice === `acct:${a.id}` ? "selected" : ""}>${esc(acctLabel(a))}</option>`).join("");
+  const qs = (it.questions || []).filter((q) => q.id !== "which" && q.id !== "type").map((q) => {
+    if (q.id === "contributing") return `<div class="rq" data-q="contributing">${esc(q.text)}<div class="rq-opts">
+      ${[["Yes", 1], ["No", 0], ["Not sure", null]].map(([l, v]) => `<button type="button" data-v="${v}" class="${d.contributing === v ? "on" : ""}">${l}</button>`).join("")}</div></div>`;
+    if (q.id === "balance_date") return `<div class="rq">${esc(q.text)}<label>Balance date <input type="date" data-bdate value="${esc(d.balanceDate)}"></label></div>`;
+    return `<div class="rq">${esc(q.text)}</div>`;
+  }).join("");
+  return `<div class="ritem-top"><span class="ritem-file" title="${esc(it.filename)}">${esc(it.filename)}</span>
+      <label><input type="checkbox" data-skip ${d.choice === "skip" ? "checked" : ""}> Skip</label></div>
+    <div class="ritem-summary">${(it.summary || []).map((x, i) => i ? esc(x) : `<b>${esc(x)}</b>`).join(" · ")}</div>
+    ${m.reason ? `<div class="ritem-match ${m.confidence}">${esc(m.confidence === "sure" ? "Matched: " : m.confidence === "likely" ? "Probably: " : "")}${esc(m.reason)}</div>` : ""}
+    <div class="ritem-fields">
+      <label>Account<select data-choice class="wide">
+        ${d.choice === "" ? `<option value="" selected>Choose an account</option>` : ""}
+        <option value="new" ${d.choice === "new" ? "selected" : ""}>New account</option>${opts}</select></label>
+      <div data-newfields class="newfields" ${d.choice === "new" ? "" : "hidden"}>
+        <label>Name<input data-n="name" value="${esc(d.newAcct.name)}" class="wide"></label>
+        <label>Type<select data-n="kind">${kindOptions(d.newAcct.kind)}</select></label>
+        <label>Institution<input data-n="institution" value="${esc(d.newAcct.institution)}" size="12"></label>
+        <label>Last 4<input data-n="last4" value="${esc(d.newAcct.last4)}" size="5" inputmode="numeric" maxlength="4"></label>
+      </div>
+    </div>${qs}`;
+}
+
+function wireItem(it, el) {
+  if (it.status !== "ready") return;
+  const d = decisionFor(it);
+  const sel = el.querySelector("[data-choice]");
+  sel.onchange = () => {
+    d.choice = sel.value;
+    el.querySelectorAll("[data-newfields]").forEach((x) => (x.hidden = d.choice !== "new"));
+  };
+  el.querySelector("[data-skip]").onchange = (e) => {
+    d.choice = e.target.checked ? "skip" : (it.match?.account_id ? `acct:${it.match.account_id}` : "new");
+    el.classList.toggle("skip", e.target.checked);
+    if (!e.target.checked) sel.value = d.choice;
+  };
+  el.querySelectorAll("[data-n]").forEach((inp) => inp.oninput = inp.onchange = () => (d.newAcct[inp.dataset.n] = inp.value));
+  el.querySelectorAll("[data-q=contributing] button").forEach((b) => b.onclick = () => {
+    d.contributing = b.dataset.v === "null" ? null : +b.dataset.v;
+    el.querySelectorAll("[data-q=contributing] button").forEach((x) => x.classList.toggle("on", x === b));
   });
-  document.querySelectorAll("[data-qk]").forEach((el) => el.onchange = () => (queue[el.dataset.qk].kind = el.value));
-  document.querySelectorAll("[data-qx]").forEach((el) => el.onclick = () => { queue.splice(+el.dataset.qx, 1); renderQueue(); });
+  const bd = el.querySelector("[data-bdate]");
+  if (bd) bd.onchange = () => (d.balanceDate = bd.value);
 }
 
-$("#all-kind").innerHTML = kindOptions("checking");
-$("#all-account").oninput = () => {
-  const k = kindFor($("#all-account").value);
-  if (k) $("#all-kind").value = k;
-  queue.forEach((q) => { q.account = $("#all-account").value; q.kind = $("#all-kind").value; });
-  renderQueue();
-};
-$("#all-kind").onchange = () => { queue.forEach((q) => (q.kind = $("#all-kind").value)); renderQueue(); };
+$("#review-cancel").onclick = () => { batch = null; decisions = {}; $("#review-list").innerHTML = ""; renderReview(); };
 $("#file-input").onchange = (e) => { addFiles(e.target.files); e.target.value = ""; };
-$("#queue-clear").onclick = () => { queue = []; renderQueue(); };
+
+$("#review-save").onclick = async () => {
+  const items = [];
+  for (const it of batch.items.filter((i) => i.status === "ready")) {
+    const d = decisionFor(it);
+    if (d.choice === "") return alert(`Choose an account for ${it.filename}.`);
+    if (d.choice === "new" && !d.newAcct.name.trim()) return alert(`Name the new account for ${it.filename}.`);
+    if ((it.questions || []).some((q) => q.id === "balance_date") && !d.balanceDate && d.choice !== "skip")
+      return alert(`Give the balance date for ${it.filename}, or skip it.`);
+    items.push({ id: it.id, skip: d.choice === "skip",
+      account_id: d.choice.startsWith("acct:") ? +d.choice.slice(5) : null,
+      new_account: d.choice === "new" ? { ...d.newAcct, last4: d.newAcct.last4 || null, institution: d.newAcct.institution || null,
+                                          subtype: d.newAcct.subtype || null } : null,
+      contributing: d.contributing, balance_date: d.balanceDate || null, sign: $("#review-sign").value });
+  }
+  const btn = $("#review-save"); btn.disabled = true;
+  const job = await pollJob(await api(`/api/stage/${batch.id}/commit`, json("POST", { items })), (j) => (btn.textContent = j.message || "Saving"));
+  btn.textContent = "Save";
+  for (const r of (job.results || []).slice().reverse()) {
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.innerHTML = r.not_imported ? `<b>${esc(r.filename)}</b>: skipped.` : r.error ? `<b>${esc(r.filename)}</b>: <span class="neg">${esc(r.error)}</span>`
+      : describe({ ...r, categorize: job.categorize }, r.filename);
+    $("#import-log").prepend(line);
+  }
+  if (job.status === "error") alert(job.message);
+  batch = null; decisions = {}; $("#review-list").innerHTML = ""; renderReview();
+  await Promise.all([loadMeta(), loadStatus()]);
+  loadImports();
+};
 
 // Drag and drop anywhere in the window; never let a dropped file navigate the page away.
 let dragDepth = 0;
@@ -235,12 +375,13 @@ window.addEventListener("drop", (e) => {
 
 function describe(job, name) {
   const c = job.categorize || {};
-  const bits = [`found ${job.found} transactions, added ${job.added}`];
+  const bits = [job.found ? `found ${job.found} transactions, added ${job.added}` : "balance only"];
   if (job.skipped) bits.push(`skipped ${job.skipped} already imported`);
   if (job.flipped) bits.push("flipped signs (purchases were positive)");
   if (job.dropped) bits.push(`ignored ${job.dropped} rows the model read that weren't on the page`);
   let html = `<b>${esc(name)}</b>: ${bits.join(", ")}.`;
-  if (job.period_start || job.period_end) html += ` Period ${job.period_start || "?"} to ${job.period_end || "?"}.`;
+  if (job.period_start && job.period_end) html += ` Period ${job.period_start} to ${job.period_end}.`;
+  else if (job.period_end) html += ` As of ${job.period_end}.`;
   if (job.ending_balance != null) html += ` Ending balance ${money(job.ending_balance)}.`;
   if (job.balances_added || job.balances_confirmed)
     html += ` Balance history: ${job.balances_added} new point${job.balances_added === 1 ? "" : "s"}` +
@@ -253,35 +394,6 @@ function describe(job, name) {
   if (notes.length) html += `<ul>${notes.map((n) => `<li>${n}</li>`).join("")}</ul>`;
   return html;
 }
-
-$("#queue-go").onclick = async () => {
-  const missing = queue.filter((q) => !q.account.trim());
-  if (missing.length) return alert(`Give every file an account (${missing.length} missing).`);
-  const btn = $("#queue-go"); btn.disabled = true;
-  // Oldest statements first reads most naturally in the log; order doesn't affect the result.
-  const items = queue.splice(0);
-  renderQueue();
-  for (const q of items) {
-    const line = document.createElement("div");
-    line.className = "log-line";
-    $("#import-log").prepend(line);
-    const fd = new FormData();
-    fd.append("file", q.file); fd.append("account", q.account.trim()); fd.append("sign", $("#all-sign").value);
-    fd.append("kind", q.kind);
-    try {
-      const job = await pollJob(await api("/api/import", { method: "POST", body: fd }),
-        (j) => (line.innerHTML = `<b>${esc(q.file.name)}</b>: ${esc(j.message || "")}`));
-      line.innerHTML = job.status === "error"
-        ? `<b>${esc(q.file.name)}</b>: <span class="neg">${esc(job.message)}</span>` : describe(job, q.file.name);
-    } catch (err) {
-      line.innerHTML = `<b>${esc(q.file.name)}</b>: <span class="neg">${esc(err.message)}</span>`;
-    }
-    await loadStatus();   // so the next file's account type is known
-  }
-  btn.disabled = false;
-  await loadMeta();
-  loadImports();
-};
 
 async function loadImports() {
   const rows = await api("/api/imports");
@@ -326,9 +438,12 @@ async function loadAccounts() {
     if (change != null) facts.push(`${change >= 0 ? "Up" : "Down"} ${money(Math.abs(change))} since ${niceDate(first.date)}`);
     if (a.transactions) facts.push(`${a.transactions} transactions, ${a.first_date} to ${a.last_date}`);
     if (!a.in_budget && a.in_12m) facts.push(`${money(a.in_12m)} in over the last 12 months (contributions, dividends)`);
+    const ident = [a.institution, a.subtype, a.last4 ? `ending ${a.last4}` : ""].filter(Boolean).join(" · ");
+    if (!a.in_budget && a.contributing != null) facts.push(a.contributing ? "You're contributing" : "Not contributing now");
     return `<div class="acct">
       <div class="acct-top"><span class="acct-name" title="${esc(a.name)}">${esc(a.name)}</span>
         <select data-kind="${a.id}" aria-label="Type of ${esc(a.name)}">${kindOptions(a.kind)}</select></div>
+      ${ident ? `<div class="muted small">${esc(ident)}</div>` : ""}
       <div class="acct-bal">${l ? money(l.balance) : "No balance yet"} ${l ? `<span>as of ${l.date}</span>` : ""}</div>
       ${sparkline(a.history)}
       <div class="acct-facts">${facts.map((f) => `<span>${f}</span>`).join("")}${a.in_budget ? "" : `<span class="tag">Not in budget</span>`}</div>

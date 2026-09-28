@@ -172,7 +172,7 @@ def parse_csv(data: bytes) -> Parsed:
         points = [(d, v[0] if newest_first else v[-1]) for d, v in sorted(balances.items())]
     dates = sorted(t.date for t in txns)
     return Parsed(txns, "csv", balances=points, period_start=dates[0] if dates else None,
-                  period_end=dates[-1] if dates else None)
+                  period_end=dates[-1] if dates else None, text="\n".join(text.splitlines()[:40])[:6000])
 
 
 # ---------- PDF ----------
@@ -243,6 +243,7 @@ PDF_SCHEMA = {
 
 META_PROMPT = """From this financial statement text, give the statement period and the account's total balance
 at the start and end of the period (the whole account's value, not one fund or one line). Use YYYY-MM-DD dates.
+Some statements only show one balance "as of" a date: use that as ending_balance and statement_date.
 Use null for anything the text doesn't state.
 
 Statement text:
@@ -253,8 +254,9 @@ Statement text:
 META_SCHEMA = {
     "type": "object",
     "properties": {"period_start": {"type": ["string", "null"]}, "period_end": {"type": ["string", "null"]},
-                   "beginning_balance": {"type": ["number", "null"]}, "ending_balance": {"type": ["number", "null"]}},
-    "required": ["period_start", "period_end", "beginning_balance", "ending_balance"],
+                   "beginning_balance": {"type": ["number", "null"]}, "ending_balance": {"type": ["number", "null"]},
+                   "statement_date": {"type": ["string", "null"]}},
+    "required": ["period_start", "period_end", "beginning_balance", "ending_balance", "statement_date"],
 }
 
 
@@ -268,6 +270,7 @@ class Parsed:
     beginning_balance: float | None = None
     ending_balance: float | None = None
     balances: list[tuple[str, float]] | None = None   # (date, balance) points, e.g. from a CSV balance column
+    text: str = ""                                    # start of the document, for identifying the account
 
     def balance_points(self) -> list[tuple[str, float]]:
         """Every dated balance this file tells us about. A beginning balance is the balance at the end
@@ -293,6 +296,10 @@ RANGE_RES = [
 MONEY = r"\$?\s?\(?(-?[\d,]+\.\d{2})\)?"
 BEGIN_RE = re.compile(r"(?:beginning|opening|starting|previous)\s+(?:account\s+)?(?:balance|value)[^\n\d$(-]{0,40}" + MONEY, re.I)
 END_RE = re.compile(r"(?:ending|closing|new)\s+(?:account\s+)?(?:balance|value)[^\n\d$(-]{0,40}" + MONEY, re.I)
+# Balance-only statements often just say "Total account value" or "Balance as of 06/30/2026".
+VALUE_RE = re.compile(r"(?:total\s+)?(?:account|portfolio|plan|vested)\s+(?:value|balance)(?:\s+as\s+of\s+(?P<asof>[\w/ ,]{6,20}?))?"
+                      r"[^\n\d$(-]{0,30}" + MONEY, re.I)
+ASOF_RE = re.compile(r"balance\s+(?:as\s+of|on)\s+(?P<asof>[\w/ ,]{6,20}?)[:\s]+" + MONEY, re.I)
 
 
 def _date_any(s: str) -> str | None:
@@ -313,6 +320,15 @@ def _regex_meta(text: str) -> dict:
         m = rx.search(text)
         if m:
             meta[key] = parse_amount(m.group(1))
+    if meta.get("ending_balance") is None:
+        for rx in (ASOF_RE, VALUE_RE):
+            m = rx.search(text)
+            if m:
+                meta["ending_balance"] = parse_amount(m.group(len(m.groups())))
+                asof = m.groupdict().get("asof")
+                if asof and not meta.get("period_end"):
+                    meta["period_end"] = _date_any(asof.strip())
+                break
     return meta
 
 
@@ -328,6 +344,8 @@ def statement_meta(pages: list[str]) -> dict:
             d = parse_date(str(m.get(k) or ""))
             if d:
                 meta[k] = d
+        if not meta.get("period_end"):
+            meta["period_end"] = parse_date(str(m.get("statement_date") or "")) or None
         for k in ("beginning_balance", "ending_balance"):
             v = m.get(k)
             # Only trust a balance the model read if that figure is actually in the statement.
@@ -382,5 +400,5 @@ def parse_pdf(data: bytes, progress=None) -> Parsed:
         txns, parser = _regex_parse(pages), "pdf-regex"
     if not txns and meta.get("ending_balance") is None:
         raise ImportError_("Couldn't find transactions or a balance in this PDF.")
-    return Parsed(txns, parser, dropped, **{k: meta.get(k) for k in
-                                            ("period_start", "period_end", "beginning_balance", "ending_balance")})
+    return Parsed(txns, parser, dropped, text="\n".join(pages[:2])[:8000],
+                  **{k: meta.get(k) for k in ("period_start", "period_end", "beginning_balance", "ending_balance")})

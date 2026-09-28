@@ -1,6 +1,8 @@
 """SQLite storage. One file under data/, never leaves this Mac."""
 import os
+import shutil
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("FINANCE_DATA", Path(__file__).resolve().parent.parent / "data"))
@@ -34,8 +36,12 @@ DEFAULT_CATEGORIES = [
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'checking'   -- checking | savings | credit | retirement | investment
+    name TEXT NOT NULL,              -- not unique: two "401(k)"s at different employers are both fine
+    kind TEXT NOT NULL DEFAULT 'checking',  -- checking | savings | credit | retirement | investment
+    institution TEXT,                -- e.g. Fidelity
+    last4 TEXT,                      -- last digits of the account number; with institution, identifies it
+    subtype TEXT,                    -- e.g. 401(k), Roth IRA, HSA, 529, brokerage
+    contributing INTEGER             -- 1 yes, 0 no, NULL unknown (retirement and investment accounts)
 );
 CREATE TABLE IF NOT EXISTS balances (
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -136,11 +142,48 @@ MIGRATIONS = [
     ("imports", "period_end", "ALTER TABLE imports ADD COLUMN period_end TEXT"),
     ("imports", "ending_balance", "ALTER TABLE imports ADD COLUMN ending_balance REAL"),
     ("imports", "rows_skipped", "ALTER TABLE imports ADD COLUMN rows_skipped INTEGER"),
+    ("accounts", "institution", "ALTER TABLE accounts ADD COLUMN institution TEXT"),
+    ("accounts", "last4", "ALTER TABLE accounts ADD COLUMN last4 TEXT"),
+    ("accounts", "subtype", "ALTER TABLE accounts ADD COLUMN subtype TEXT"),
+    ("accounts", "contributing", "ALTER TABLE accounts ADD COLUMN contributing INTEGER"),
 ]
+
+
+ACCOUNT_COLS = "id, name, kind, institution, last4, subtype, contributing"
+
+
+def _rebuild_accounts(con: sqlite3.Connection) -> None:
+    """Older databases made account names unique. SQLite can't drop a constraint, so copy the table."""
+    sql = con.execute("SELECT sql FROM sqlite_master WHERE name = 'accounts'").fetchone()
+    if not sql or "UNIQUE" not in sql[0].upper():
+        return
+    backup = DATA_DIR / "backups" / f"before-accounts-migration-{datetime.now():%Y%m%d-%H%M%S}.db"
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    con.commit()
+    shutil.copy2(DB_PATH, backup)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(accounts)")]
+    con.execute("PRAGMA foreign_keys = OFF")
+    try:
+        con.execute("BEGIN")
+        con.execute("""CREATE TABLE accounts_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                       kind TEXT NOT NULL DEFAULT 'checking', institution TEXT, last4 TEXT, subtype TEXT,
+                       contributing INTEGER)""")
+        keep = [c for c in ("id", "name", "kind") if c in cols]
+        con.execute(f"INSERT INTO accounts_new({', '.join(keep)}) SELECT {', '.join(keep)} FROM accounts")
+        con.execute("DROP TABLE accounts")
+        con.execute("ALTER TABLE accounts_new RENAME TO accounts")
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    finally:
+        con.execute("PRAGMA foreign_keys = ON")
 
 
 def init() -> None:
     with connect() as con:
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name = 'accounts'").fetchone():
+            _rebuild_accounts(con)
         for table, col, sql in MIGRATIONS:
             cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
             if cols and col not in cols:
@@ -150,10 +193,20 @@ def init() -> None:
 
 
 def account_id(con: sqlite3.Connection, name: str, kind: str | None = None) -> int:
-    con.execute("INSERT OR IGNORE INTO accounts(name, kind) VALUES (?, ?)", (name, kind or "checking"))
-    if kind in ACCOUNT_KINDS:
-        con.execute("UPDATE accounts SET kind = ? WHERE name = ?", (kind, name))
-    return con.execute("SELECT id FROM accounts WHERE name = ?", (name,)).fetchone()["id"]
+    """Find an account by name, creating it if there's none (names aren't unique; first match wins)."""
+    r = con.execute("SELECT id FROM accounts WHERE name = ? ORDER BY id LIMIT 1", (name,)).fetchone()
+    if r:
+        if kind in ACCOUNT_KINDS:
+            con.execute("UPDATE accounts SET kind = ? WHERE id = ?", (kind, r["id"]))
+        return r["id"]
+    return create_account(con, name, kind or "checking")
+
+
+def create_account(con: sqlite3.Connection, name: str, kind: str = "checking", institution: str | None = None,
+                   last4: str | None = None, subtype: str | None = None, contributing: int | None = None) -> int:
+    return con.execute("INSERT INTO accounts(name, kind, institution, last4, subtype, contributing) "
+                       "VALUES (?, ?, ?, ?, ?, ?)", (name.strip(), kind if kind in ACCOUNT_KINDS else "checking",
+                                                     institution, last4, subtype, contributing)).lastrowid
 
 
 def categories(con: sqlite3.Connection) -> list[dict]:
