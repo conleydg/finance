@@ -26,6 +26,9 @@ a { color: var(--accent); text-decoration: none; }
 .sidebar { width: 232px; flex-shrink: 0; background: var(--side); color: var(--side-text); padding: 28px 18px;
            display: flex; flex-direction: column; gap: 6px; position: sticky; top: 0; height: 100vh; }
 .brand { font: 700 22px var(--display); color: #fff; padding: 0 12px 24px; }
+#demo-badge { display: inline-block; vertical-align: middle; margin-left: 6px; font: 600 11px -apple-system, sans-serif;
+              letter-spacing: .04em; text-transform: uppercase; color: #15181d; background: #e0b04a; border-radius: 6px; padding: 3px 7px; }
+#demo-badge[hidden] { display: none; }
 .sidebar nav { display: flex; flex-direction: column; gap: 4px; }
 .sidebar nav button { text-align: left; background: none; border: 0; color: var(--side-text); padding: 12px; border-radius: 10px; cursor: pointer; }
 .sidebar nav button.active { background: var(--side-active); color: #fff; font-weight: 600; }

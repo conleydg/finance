@@ -71,7 +71,8 @@ def status():
     with db.connect() as con:
         n = con.execute("SELECT count(*) FROM transactions").fetchone()[0]
         accounts = [dict(r) for r in con.execute("SELECT id, name FROM accounts ORDER BY name")]
-    return {"model": llm.MODEL, "model_ok": llm.available(), "transactions": n, "accounts": accounts}
+    return {"model": llm.MODEL, "model_ok": llm.available(), "transactions": n, "accounts": accounts,
+            "demo": db.DATA_DIR.name == "data-demo"}
 
 
 @app.post("/api/import")

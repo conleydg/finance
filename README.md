@@ -17,6 +17,15 @@ Or build a Dock app that starts the server if needed and opens it in its own win
 macos/make_app.sh   # creates ~/Applications/Finance.app; drag it to the Dock
 ```
 
+### Demo copy
+
+```bash
+./demo.sh                    # http://127.0.0.1:8771, six months of made-up data
+DEMO=1 macos/make_app.sh     # optional "Finance Demo" Dock app
+```
+
+The demo lives in `data-demo/`, is rebuilt on every start, and shows a "Demo data" badge. `demo/seed.py` refuses to write anywhere but a folder named `data-demo`. Use it for screenshots, trying changes, and anything a cloud tool looks at; never point those at the real app.
+
 First-time setup:
 
 ```bash

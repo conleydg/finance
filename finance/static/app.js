@@ -28,6 +28,8 @@ async function loadStatus() {
   const el = $("#model-status");
   el.textContent = s.model_ok ? `Local model ready (${s.model.split(":")[0]})` : "Local model offline";
   el.className = s.model_ok ? "ok" : "bad";
+  $("#demo-badge").hidden = !s.demo;
+  if (s.demo) document.title = "Finance (demo)";
   $("#accounts").innerHTML = s.accounts.map((a) => `<option value="${esc(a.name)}">`).join("");
   return s;
 }
