@@ -5,3 +5,5 @@ __pycache__/
 .pytest_cache/
 tests/samples/
 data-demo/
+macos/build/
+macos/dist/

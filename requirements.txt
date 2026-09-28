@@ -3,6 +3,10 @@ uvicorn[standard]
 python-multipart
 pdfplumber
 httpx
+pywebview
+# building the Mac apps
+py2app
+pillow
 # tests only
 pytest
 reportlab

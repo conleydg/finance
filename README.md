@@ -11,17 +11,19 @@ A personal finance app that runs entirely on this Mac. Import bank and card stat
 ./start.sh          # http://127.0.0.1:8770
 ```
 
-Or build a Dock app that starts the server if needed and opens it in its own window:
+Or use it as a Mac app: its own window (WebKit via pywebview) with the server running inside it, so Cmd+Q stops everything.
 
 ```bash
-macos/make_app.sh   # creates ~/Applications/Finance.app; drag it to the Dock
+macos/build_apps.sh   # creates ~/Applications/Finance.app and Finance Demo.app; drag to the Dock
 ```
+
+The apps are py2app alias builds: they run the code in this folder with its `.venv`, so code changes only need the app reopened, not rebuilt.
 
 ### Demo copy
 
 ```bash
 ./demo.sh                    # http://127.0.0.1:8771, six months of made-up data
-DEMO=1 macos/make_app.sh     # optional "Finance Demo" Dock app
+                             # or open Finance Demo.app
 ```
 
 The demo lives in `data-demo/`, is rebuilt on every start, and shows a "Demo data" badge. `demo/seed.py` refuses to write anywhere but a folder named `data-demo`. Use it for screenshots, trying changes, and anything a cloud tool looks at; never point those at the real app.
