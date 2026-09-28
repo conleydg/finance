@@ -5,7 +5,7 @@ from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -63,7 +63,12 @@ def _run_import(job: dict, filename: str, data: bytes, account: str, sign: str) 
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    # Version the asset URLs so a browser can never pair a new page with an old script.
+    html = (STATIC / "index.html").read_text()
+    for name in ("style.css", "app.js"):
+        v = int((STATIC / name).stat().st_mtime)
+        html = html.replace(f"/static/{name}", f"/static/{name}?v={v}")
+    return HTMLResponse(html)
 
 
 @app.get("/api/status")

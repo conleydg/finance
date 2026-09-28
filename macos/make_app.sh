@@ -39,7 +39,8 @@ if ! up; then
   for _ in \$(seq 1 40); do up && break; sleep 0.25; done
 fi
 if [ -d "/Applications/Google Chrome.app" ]; then
-  open -na "Google Chrome" --args --app="\$URL"
+  # A fresh query string each launch means Chrome never reuses a stale copy of the page.
+  open -na "Google Chrome" --args --app="\${URL}?launch=\$(date +%s)"
 else
   open "\$URL"
 fi
