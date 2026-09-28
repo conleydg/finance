@@ -1,11 +1,13 @@
 """Statement parsers. Each returns a list of Txn (date, description, amount) with
 amount negative for money out and positive for money in."""
+from __future__ import annotations
+
 import csv
 import hashlib
 import io
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from . import llm
 
@@ -118,7 +120,10 @@ def _pick(header: list[str], names: list[str]) -> int | None:
     return None
 
 
-def parse_csv(data: bytes) -> tuple[list[Txn], str]:
+BALANCE_COLS = ["balance", "running bal.", "running balance", "running bal", "available balance", "ending balance"]
+
+
+def parse_csv(data: bytes) -> Parsed:
     text = data.decode("utf-8-sig", errors="replace")
     try:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
@@ -133,7 +138,8 @@ def parse_csv(data: bytes) -> tuple[list[Txn], str]:
             break
     else:
         raise ImportError_("Couldn't find date, description and amount columns in this CSV.")
-    txns = []
+    bal_col = _pick(header, BALANCE_COLS)
+    txns, balances = [], {}
     for r in rows[hi + 1:]:
         if not any(c.strip() for c in r):
             continue
@@ -155,7 +161,18 @@ def parse_csv(data: bytes) -> tuple[list[Txn], str]:
         if not description and memo is not None:
             description = " ".join(get(memo).split())
         txns.append(Txn(day, description or "(no description)", value))
-    return txns, "csv"
+        if bal_col is not None:
+            b = parse_amount(get(bal_col))
+            if b is not None:
+                # Files are newest-first or oldest-first; keep the end-of-day figure either way (fixed below).
+                balances.setdefault(day, []).append(b)
+    points = []
+    if balances:
+        newest_first = len(txns) > 1 and txns[0].date > txns[-1].date
+        points = [(d, v[0] if newest_first else v[-1]) for d, v in sorted(balances.items())]
+    dates = sorted(t.date for t in txns)
+    return Parsed(txns, "csv", balances=points, period_start=dates[0] if dates else None,
+                  period_end=dates[-1] if dates else None)
 
 
 # ---------- PDF ----------
@@ -199,12 +216,15 @@ def _regex_parse(pages: list[str]) -> list[Txn]:
     return out
 
 
-PDF_PROMPT = """You are extracting transactions from one page of a bank or credit card statement.
-Return every individual transaction on this page (purchases, payments, deposits, withdrawals, fees, interest).
-Skip balances, totals, summaries, and rewards. Use YYYY-MM-DD dates; the statement period is {period}.
-amount: negative when money leaves the account holder (purchases, withdrawals, fees, checks),
-positive when money comes in (deposits, payroll, refunds, and payments TO a credit card from the holder's
-point of view on a card statement are positive). Copy descriptions as written.
+PDF_PROMPT = """You are extracting transactions from one page of a financial account statement
+(bank, credit card, retirement plan such as a 401(k) or IRA, or brokerage).
+Return every individual dated transaction on this page: purchases, payments, deposits, withdrawals, fees, interest,
+and for retirement or brokerage accounts contributions, employer match, dividends, withdrawals and fees.
+Skip balances, totals, summaries, rewards, holdings or positions tables, and exchanges between funds inside the
+same account. Use YYYY-MM-DD dates; the statement period is {period}.
+amount: negative when money leaves the account (purchases, withdrawals, fees, checks),
+positive when money comes in (deposits, payroll, refunds, contributions, employer match, dividends; payments TO a
+credit card are positive on a card statement). Copy descriptions as written.
 
 Page text:
 <<<
@@ -221,15 +241,107 @@ PDF_SCHEMA = {
     "required": ["transactions"],
 }
 
+META_PROMPT = """From this financial statement text, give the statement period and the account's total balance
+at the start and end of the period (the whole account's value, not one fund or one line). Use YYYY-MM-DD dates.
+Use null for anything the text doesn't state.
+
+Statement text:
+<<<
+{text}
+>>>"""
+
+META_SCHEMA = {
+    "type": "object",
+    "properties": {"period_start": {"type": ["string", "null"]}, "period_end": {"type": ["string", "null"]},
+                   "beginning_balance": {"type": ["number", "null"]}, "ending_balance": {"type": ["number", "null"]}},
+    "required": ["period_start", "period_end", "beginning_balance", "ending_balance"],
+}
+
+
+@dataclass
+class Parsed:
+    txns: list[Txn]
+    parser: str
+    dropped: int = 0
+    period_start: str | None = None
+    period_end: str | None = None
+    beginning_balance: float | None = None
+    ending_balance: float | None = None
+    balances: list[tuple[str, float]] | None = None   # (date, balance) points, e.g. from a CSV balance column
+
+    def balance_points(self) -> list[tuple[str, float]]:
+        """Every dated balance this file tells us about. A beginning balance is the balance at the end
+        of the day before the period starts, so consecutive statements land on the same point."""
+        pts = dict(self.balances or [])
+        if self.period_end and self.ending_balance is not None:
+            pts[self.period_end] = self.ending_balance
+        if self.period_start and self.beginning_balance is not None:
+            day = (date.fromisoformat(self.period_start) - timedelta(days=1)).isoformat()
+            pts.setdefault(day, self.beginning_balance)
+        return sorted(pts.items())
+
 
 def _amount_in_text(amount: float, text: str) -> bool:
     a = f"{abs(amount):,.2f}"
     return a in text or a.replace(",", "") in text
 
 
-def _model_parse(pages: list[str], progress=None) -> tuple[list[Txn], int]:
-    end = _statement_year_end("\n".join(pages))
-    period = f"ending around {end.isoformat()}" if end else "unknown"
+RANGE_RES = [
+    re.compile(r"(\d{1,2}/\d{1,2}/\d{2,4})\s*(?:-|–|to|through|thru)\s*(\d{1,2}/\d{1,2}/\d{2,4})", re.I),
+    re.compile(r"([A-Z][a-z]{2,8}\.? \d{1,2},? \d{4})\s*(?:-|–|to|through|thru)\s*([A-Z][a-z]{2,8}\.? \d{1,2},? \d{4})", re.I),
+]
+MONEY = r"\$?\s?\(?(-?[\d,]+\.\d{2})\)?"
+BEGIN_RE = re.compile(r"(?:beginning|opening|starting|previous)\s+(?:account\s+)?(?:balance|value)[^\n\d$(-]{0,40}" + MONEY, re.I)
+END_RE = re.compile(r"(?:ending|closing|new)\s+(?:account\s+)?(?:balance|value)[^\n\d$(-]{0,40}" + MONEY, re.I)
+
+
+def _date_any(s: str) -> str | None:
+    s = s.replace(".", "").replace(",", ", ").replace(",  ", ", ")
+    return parse_date(s) or parse_date(s.replace(",", ""))
+
+
+def _regex_meta(text: str) -> dict:
+    meta: dict = {}
+    for rx in RANGE_RES:
+        m = rx.search(text)
+        if m:
+            a, b = _date_any(m.group(1)), _date_any(m.group(2))
+            if a and b and a <= b:
+                meta.update(period_start=a, period_end=b)
+                break
+    for key, rx in (("beginning_balance", BEGIN_RE), ("ending_balance", END_RE)):
+        m = rx.search(text)
+        if m:
+            meta[key] = parse_amount(m.group(1))
+    return meta
+
+
+def statement_meta(pages: list[str]) -> dict:
+    text = "\n".join(pages[:2] + (pages[-1:] if len(pages) > 2 else []))[:14000]
+    meta = _regex_meta(text)
+    if llm.available():
+        try:
+            m = llm.chat_json(META_PROMPT.format(text=text), META_SCHEMA)
+        except Exception:
+            m = {}
+        for k in ("period_start", "period_end"):
+            d = parse_date(str(m.get(k) or ""))
+            if d:
+                meta[k] = d
+        for k in ("beginning_balance", "ending_balance"):
+            v = m.get(k)
+            # Only trust a balance the model read if that figure is actually in the statement.
+            if isinstance(v, (int, float)) and _amount_in_text(v, text):
+                meta[k] = float(v)
+    if meta.get("period_start") and meta.get("period_end") and meta["period_start"] > meta["period_end"]:
+        meta.pop("period_start")
+    return meta
+
+
+def _model_parse(pages: list[str], progress=None, period: str | None = None) -> tuple[list[Txn], int]:
+    if not period:
+        end = _statement_year_end("\n".join(pages))
+        period = f"ending around {end.isoformat()}" if end else "unknown"
     out, dropped = [], 0
     for i, page in enumerate(pages):
         if progress:
@@ -251,17 +363,24 @@ def _model_parse(pages: list[str], progress=None) -> tuple[list[Txn], int]:
     return out, dropped
 
 
-def parse_pdf(data: bytes, progress=None) -> tuple[list[Txn], str, int]:
+def parse_pdf(data: bytes, progress=None) -> Parsed:
     import pdfplumber
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         pages = [(p.extract_text() or "") for p in pdf.pages]
     if not any(p.strip() for p in pages):
         raise ImportError_("This PDF has no text layer (probably a scan). Scanned statements aren't supported yet.")
+    if progress:
+        progress("Reading the statement period and balances")
+    meta = statement_meta(pages)
+    period = (f"{meta['period_start']} to {meta['period_end']}" if meta.get("period_start") and meta.get("period_end")
+              else None)
+    txns, parser, dropped = [], "pdf-regex", 0
     if llm.available():
-        txns, dropped = _model_parse(pages, progress)
-        if txns:
-            return txns, "pdf-model", dropped
-    txns = _regex_parse(pages)
+        txns, dropped = _model_parse(pages, progress, period)
+        parser = "pdf-model"
     if not txns:
-        raise ImportError_("Couldn't find transactions in this PDF.")
-    return txns, "pdf-regex", 0
+        txns, parser = _regex_parse(pages), "pdf-regex"
+    if not txns and meta.get("ending_balance") is None:
+        raise ImportError_("Couldn't find transactions or a balance in this PDF.")
+    return Parsed(txns, parser, dropped, **{k: meta.get(k) for k in
+                                            ("period_start", "period_end", "beginning_balance", "ending_balance")})

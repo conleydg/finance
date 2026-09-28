@@ -26,7 +26,8 @@ def apply_rules(con: sqlite3.Connection) -> int:
     cur = con.execute("""
         UPDATE transactions SET category_id = r.category_id, category_source = 'rule'
         FROM rules r WHERE r.merchant = transactions.merchant
-          AND (transactions.category_source IS NULL OR transactions.category_source = 'model')""")
+          AND (transactions.category_source IS NULL OR transactions.category_source = 'model')
+          AND transactions.account_id IN """ + db.BUDGET_ACCOUNTS)
     return cur.rowcount
 
 
@@ -37,7 +38,8 @@ def categorize_pending(progress=None) -> dict:
         names = [c["name"] for c in cats]
         ids = {c["name"]: c["id"] for c in cats}
         pending = [dict(r) for r in con.execute(
-            "SELECT id, description, amount FROM transactions WHERE category_id IS NULL ORDER BY date")]
+            "SELECT id, description, amount FROM transactions WHERE category_id IS NULL "
+            f"AND account_id IN {db.BUDGET_ACCOUNTS} ORDER BY date")]
         examples = [dict(r) for r in con.execute("""
             SELECT t.description, c.name AS category FROM transactions t
             JOIN categories c ON c.id = t.category_id WHERE t.category_source = 'user'

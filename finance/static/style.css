@@ -99,10 +99,43 @@ td select { border: 1px solid var(--line); border-radius: 8px; background: var(-
 .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; }
 
 /* import */
-#import-form { display: grid; gap: 14px; max-width: 480px; }
-#import-form label, dialog label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+dialog label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
 #import-form label input, #import-form label select { color: var(--text); }
 .log-line { padding: 12px 16px; background: var(--card); border-radius: 12px; margin-bottom: 8px; }
+
+.dropzone { border: 2px dashed var(--chip-line); border-radius: 16px; padding: 32px; text-align: center; background: var(--card);
+            display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.dropzone.over { border-color: var(--accent); background: var(--chip); }
+.drop-title { font: 600 20px var(--display); }
+.dropzone label.btn { display: inline-flex; align-items: center; margin-top: 6px; }
+#drop-overlay { position: fixed; inset: 0; background: rgb(31 95 191 / .18); border: 4px dashed var(--accent);
+                display: grid; place-items: center; z-index: 50; pointer-events: none; }
+#drop-overlay[hidden] { display: none; }
+#drop-overlay div { font: 700 28px var(--display); color: var(--accent); background: var(--card); padding: 16px 28px; border-radius: 16px; }
+.queue-all { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.queue-all label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.queue-all input, .queue-all select, #queue-table input, #queue-table select {
+  min-height: 38px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--text); }
+#queue-table td { padding: 6px 8px; }
+#queue-table td:first-child { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.log-line ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+
+/* accounts */
+.accounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+.acct { background: var(--card); border-radius: 16px; padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; }
+.acct-top { display: flex; align-items: center; gap: 8px; }
+.acct-name { font-weight: 700; font-size: 16px; flex-grow: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.acct-top select { border: 1px solid var(--line); border-radius: 8px; background: var(--card); padding: 4px 6px; }
+.acct-bal { font: 600 26px/1.2 var(--display); font-variant-numeric: tabular-nums; }
+.acct-bal span { font: 400 13px -apple-system, sans-serif; color: var(--muted); }
+.acct svg { width: 100%; height: 64px; display: block; }
+.acct .spark { fill: none; stroke: var(--accent); stroke-width: 2; }
+.acct .spark-fill { fill: var(--accent); opacity: .12; stroke: none; }
+.acct-facts { font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.acct-actions { display: flex; gap: 12px; font-size: 13px; }
+.tag { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; padding: 2px 6px; border-radius: 6px;
+       background: var(--chip); color: var(--muted); }
 
 /* dialog */
 dialog { border: 0; border-radius: 16px; padding: 24px; width: min(420px, 92vw); background: var(--card); color: var(--text); }

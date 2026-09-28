@@ -34,7 +34,16 @@ DEFAULT_CATEGORIES = [
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL
+    name TEXT UNIQUE NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'checking'   -- checking | savings | credit | retirement | investment
+);
+CREATE TABLE IF NOT EXISTS balances (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,              -- YYYY-MM-DD the balance was as of
+    balance REAL NOT NULL,
+    import_id INTEGER REFERENCES imports(id) ON DELETE SET NULL,
+    source TEXT,                     -- statement | csv | manual
+    PRIMARY KEY (account_id, date)
 );
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY,
@@ -49,6 +58,10 @@ CREATE TABLE IF NOT EXISTS imports (
     parser TEXT,
     rows_found INTEGER,
     rows_added INTEGER,
+    rows_skipped INTEGER,            -- overlapping rows already imported from another file
+    period_start TEXT,
+    period_end TEXT,
+    ending_balance REAL,
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS transactions (
@@ -112,14 +125,34 @@ def connect() -> sqlite3.Connection:
     return con
 
 
+# Accounts whose activity is investing, not spending: kept out of the budget and categorization.
+INVEST_KINDS = ("retirement", "investment")
+ACCOUNT_KINDS = ("checking", "savings", "credit", "retirement", "investment")
+BUDGET_ACCOUNTS = "(SELECT id FROM accounts WHERE kind NOT IN ('retirement', 'investment'))"
+
+MIGRATIONS = [
+    ("accounts", "kind", "ALTER TABLE accounts ADD COLUMN kind TEXT NOT NULL DEFAULT 'checking'"),
+    ("imports", "period_start", "ALTER TABLE imports ADD COLUMN period_start TEXT"),
+    ("imports", "period_end", "ALTER TABLE imports ADD COLUMN period_end TEXT"),
+    ("imports", "ending_balance", "ALTER TABLE imports ADD COLUMN ending_balance REAL"),
+    ("imports", "rows_skipped", "ALTER TABLE imports ADD COLUMN rows_skipped INTEGER"),
+]
+
+
 def init() -> None:
     with connect() as con:
+        for table, col, sql in MIGRATIONS:
+            cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
+            if cols and col not in cols:
+                con.execute(sql)
         con.executescript(SCHEMA)
         con.executemany("INSERT OR IGNORE INTO categories(name, kind) VALUES (?, ?)", DEFAULT_CATEGORIES)
 
 
-def account_id(con: sqlite3.Connection, name: str) -> int:
-    con.execute("INSERT OR IGNORE INTO accounts(name) VALUES (?)", (name,))
+def account_id(con: sqlite3.Connection, name: str, kind: str | None = None) -> int:
+    con.execute("INSERT OR IGNORE INTO accounts(name, kind) VALUES (?, ?)", (name, kind or "checking"))
+    if kind in ACCOUNT_KINDS:
+        con.execute("UPDATE accounts SET kind = ? WHERE name = ?", (kind, name))
     return con.execute("SELECT id FROM accounts WHERE name = ?", (name,)).fetchone()["id"]
 
 

@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assistant, categorize, db, goals, importers, llm
+from . import accounts, assistant, categorize, db, goals, importers, llm
 
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="Finance", docs_url=None, redoc_url=None)
@@ -28,32 +28,73 @@ async def no_stale_assets(request, call_next):
     return response
 
 
-def _run_import(job: dict, filename: str, data: bytes, account: str, sign: str) -> None:
+def _save(con, acct: int, filename: str, parsed: importers.Parsed) -> dict:
+    """Insert a parsed file. Rows already present from another file of the same account (same date and
+    amount, even if the description is worded differently) are skipped, so overlapping statements are safe."""
+    imp = con.execute(
+        "INSERT INTO imports(filename, account_id, kind, parser, rows_found, period_start, period_end, ending_balance) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (filename, acct, Path(filename).suffix.lower().lstrip("."), parsed.parser, len(parsed.txns),
+         parsed.period_start, parsed.period_end, parsed.ending_balance)).lastrowid
+    added, skipped, examples, matched = 0, 0, [], set()
+    for t, fp in zip(parsed.txns, importers.fingerprints(acct, parsed.txns)):
+        amount = round(t.amount, 2)
+        if con.execute("SELECT 1 FROM transactions WHERE fingerprint = ?", (fp,)).fetchone():
+            skipped += 1
+            continue
+        placeholders = ",".join("?" * len(matched)) or "-1"   # NOT IN (NULL) would match nothing
+        twin = con.execute(
+            f"SELECT id, description FROM transactions WHERE account_id = ? AND date = ? AND amount = ? "
+            f"AND import_id != ? AND id NOT IN ({placeholders}) LIMIT 1",
+            (acct, t.date, amount, imp, *matched)).fetchone()
+        if twin:
+            matched.add(twin["id"])
+            skipped += 1
+            if len(examples) < 5:
+                examples.append(f"{t.date} {t.description} {amount:,.2f}")
+            continue
+        con.execute(
+            "INSERT INTO transactions(account_id, import_id, date, description, merchant, amount, fingerprint) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (acct, imp, t.date, t.description, importers.merchant_key(t.description), amount, fp))
+        added += 1
+    new_pts, same_pts, conflicts = 0, 0, []
+    for day, bal in parsed.balance_points():
+        row = con.execute("SELECT balance FROM balances WHERE account_id = ? AND date = ?", (acct, day)).fetchone()
+        if row is None:
+            con.execute("INSERT INTO balances(account_id, date, balance, import_id, source) VALUES (?, ?, ?, ?, ?)",
+                        (acct, day, round(bal, 2), imp, "csv" if parsed.parser == "csv" else "statement"))
+            new_pts += 1
+        elif abs(row["balance"] - bal) < 0.01:
+            same_pts += 1
+        else:
+            conflicts.append(f"{day}: kept {row['balance']:,.2f}, this file says {bal:,.2f}")
+    con.execute("UPDATE imports SET rows_added = ?, rows_skipped = ? WHERE id = ?", (added, skipped, imp))
+    return {"added": added, "skipped": skipped, "skipped_examples": examples, "balances_added": new_pts,
+            "balances_confirmed": same_pts, "balance_conflicts": conflicts}
+
+
+def _run_import(job: dict, filename: str, data: bytes, account: str, sign: str, kind: str | None) -> None:
     def progress(msg: str) -> None:
         job["message"] = msg
     try:
-        dropped = 0
         if filename.lower().endswith(".pdf"):
-            txns, parser, dropped = importers.parse_pdf(data, progress)
+            parsed = importers.parse_pdf(data, progress)
         else:
-            txns, parser = importers.parse_csv(data)
-        txns, flipped = importers.apply_sign(txns, sign)
+            parsed = importers.parse_csv(data)
         with db.connect() as con:
-            acct = db.account_id(con, account)
-            imp = con.execute("INSERT INTO imports(filename, account_id, kind, parser, rows_found) "
-                              "VALUES (?, ?, ?, ?, ?)",
-                              (filename, acct, Path(filename).suffix.lower().lstrip("."), parser, len(txns))).lastrowid
-            added = 0
-            for t, fp in zip(txns, importers.fingerprints(acct, txns)):
-                cur = con.execute(
-                    "INSERT OR IGNORE INTO transactions(account_id, import_id, date, description, merchant, amount, fingerprint) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (acct, imp, t.date, t.description, importers.merchant_key(t.description), round(t.amount, 2), fp))
-                added += cur.rowcount
-            con.execute("UPDATE imports SET rows_added = ? WHERE id = ?", (added, imp))
-        job.update(found=len(txns), added=added, parser=parser, flipped=flipped, dropped=dropped,
-                   months=sorted({t.date[:7] for t in txns}))
-        job["categorize"] = categorize.categorize_pending(progress)
+            acct = db.account_id(con, account, kind)
+            acct_kind = con.execute("SELECT kind FROM accounts WHERE id = ?", (acct,)).fetchone()["kind"]
+            # Card-style sign detection only makes sense for spending accounts; contributions are mostly positive.
+            if acct_kind in db.INVEST_KINDS and sign == "auto":
+                sign = "asis"
+            parsed.txns, flipped = importers.apply_sign(parsed.txns, sign)
+            result = _save(con, acct, filename, parsed)
+        job.update(found=len(parsed.txns), parser=parsed.parser, flipped=flipped, dropped=parsed.dropped,
+                   account_kind=acct_kind, period_start=parsed.period_start, period_end=parsed.period_end,
+                   ending_balance=parsed.ending_balance, months=sorted({t.date[:7] for t in parsed.txns}), **result)
+        if acct_kind not in db.INVEST_KINDS:
+            job["categorize"] = categorize.categorize_pending(progress)
         job["status"] = "done"
     except importers.ImportError_ as e:
         job.update(status="error", message=str(e))
@@ -75,21 +116,24 @@ def index():
 def status():
     with db.connect() as con:
         n = con.execute("SELECT count(*) FROM transactions").fetchone()[0]
-        accounts = [dict(r) for r in con.execute("SELECT id, name FROM accounts ORDER BY name")]
+        accounts = [dict(r) for r in con.execute("SELECT id, name, kind FROM accounts ORDER BY name")]
     return {"model": llm.MODEL, "model_ok": llm.available(), "transactions": n, "accounts": accounts,
             "demo": db.DATA_DIR.name == "data-demo"}
 
 
 @app.post("/api/import")
-async def import_file(file: UploadFile = File(...), account: str = Form(...), sign: str = Form("auto")):
+async def import_file(file: UploadFile = File(...), account: str = Form(...), sign: str = Form("auto"),
+                      kind: str = Form("")):
     if sign not in ("auto", "asis", "flip"):
         raise HTTPException(400, "sign must be auto, asis or flip")
+    if kind and kind not in db.ACCOUNT_KINDS:
+        raise HTTPException(400, f"kind must be one of {', '.join(db.ACCOUNT_KINDS)}")
     if not account.strip():
         raise HTTPException(400, "Pick or name an account")
     data = await file.read()
     job_id = uuid.uuid4().hex[:12]
     job = JOBS[job_id] = {"id": job_id, "status": "running", "message": "Reading file", "filename": file.filename}
-    threading.Thread(target=_run_import, args=(job, file.filename or "upload.csv", data, account.strip(), sign),
+    threading.Thread(target=_run_import, args=(job, file.filename or "upload.csv", data, account.strip(), sign, kind or None),
                      daemon=True).start()
     return job
 
@@ -128,6 +172,7 @@ def imports():
 def delete_import(import_id: int):
     with db.connect() as con:
         n = con.execute("DELETE FROM transactions WHERE import_id = ?", (import_id,)).rowcount
+        con.execute("DELETE FROM balances WHERE import_id = ?", (import_id,))
         con.execute("DELETE FROM imports WHERE id = ?", (import_id,))
     return {"deleted": n}
 
@@ -155,14 +200,15 @@ def add_category(c: NewCategory):
 @app.get("/api/months")
 def months():
     with db.connect() as con:
-        return [r[0] for r in con.execute("SELECT DISTINCT substr(date, 1, 7) m FROM transactions ORDER BY m DESC")]
+        return [r[0] for r in con.execute("SELECT DISTINCT substr(date, 1, 7) m FROM transactions "
+                                          f"WHERE account_id IN {db.BUDGET_ACCOUNTS} ORDER BY m DESC")]
 
 
 @app.get("/api/transactions")
 def transactions(month: str | None = None, category_id: int | None = None, uncategorized: bool = False,
                  q: str | None = None, limit: int = 1000):
     sql = """SELECT t.id, t.date, t.description, t.merchant, t.amount, t.category_id, t.category_source,
-                    c.name AS category, a.name AS account
+                    c.name AS category, a.name AS account, a.kind AS account_kind
              FROM transactions t JOIN accounts a ON a.id = t.account_id
              LEFT JOIN categories c ON c.id = t.category_id WHERE 1=1"""
     args: list = []
@@ -216,13 +262,14 @@ def budget(month: str | None = None):
             marks = ",".join("?" * len(months))
             return {r[0]: r[1] for r in con.execute(
                 f"SELECT category_id, sum(amount) FROM transactions WHERE substr(date, 1, 7) IN ({marks}) "
-                "GROUP BY category_id", months)}
+                f"AND account_id IN {db.BUDGET_ACCOUNTS} GROUP BY category_id", months)}
         cur, hist = sums([month]), sums(prev)
         hist_months = con.execute(
             f"SELECT count(DISTINCT substr(date, 1, 7)) FROM transactions WHERE substr(date, 1, 7) IN "
-            f"({','.join('?' * len(prev))})", prev).fetchone()[0] or 1
+            f"({','.join('?' * len(prev))}) AND account_id IN {db.BUDGET_ACCOUNTS}", prev).fetchone()[0] or 1
         uncategorized = con.execute("SELECT count(*), coalesce(sum(amount), 0) FROM transactions "
-                                    "WHERE category_id IS NULL AND date LIKE ?", (f"{month}-%",)).fetchone()
+                                    f"WHERE category_id IS NULL AND date LIKE ? AND account_id IN {db.BUDGET_ACCOUNTS}",
+                                    (f"{month}-%",)).fetchone()
     rows, income, spent = [], 0.0, 0.0
     for cid, c in cats.items():
         net = cur.get(cid, 0.0)
@@ -334,4 +381,56 @@ def edit_goal(goal_id: int, g: GoalIn):
 def delete_goal(goal_id: int):
     with db.connect() as con:
         con.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+    return {"ok": True}
+
+
+# ---------- Accounts and balances ----------
+
+@app.get("/api/accounts")
+def list_accounts():
+    with db.connect() as con:
+        return accounts.list_accounts(con)
+
+
+class AccountIn(BaseModel):
+    name: str | None = None
+    kind: str | None = None
+
+
+@app.patch("/api/accounts/{account_id}")
+def edit_account(account_id: int, a: AccountIn):
+    with db.connect() as con:
+        if a.kind:
+            if a.kind not in db.ACCOUNT_KINDS:
+                raise HTTPException(400, f"kind must be one of {', '.join(db.ACCOUNT_KINDS)}")
+            con.execute("UPDATE accounts SET kind = ? WHERE id = ?", (a.kind, account_id))
+        if a.name and a.name.strip():
+            try:
+                con.execute("UPDATE accounts SET name = ? WHERE id = ?", (a.name.strip(), account_id))
+            except Exception:
+                raise HTTPException(400, "Another account already has that name")
+    return {"ok": True}
+
+
+class BalanceIn(BaseModel):
+    date: str
+    balance: float
+
+
+@app.post("/api/accounts/{account_id}/balances")
+def add_balance(account_id: int, b: BalanceIn):
+    day = importers.parse_date(b.date)
+    if not day:
+        raise HTTPException(400, "Use a date like 2026-09-30")
+    with db.connect() as con:
+        con.execute("INSERT INTO balances(account_id, date, balance, source) VALUES (?, ?, ?, 'manual') "
+                    "ON CONFLICT(account_id, date) DO UPDATE SET balance = excluded.balance, source = 'manual'",
+                    (account_id, day, round(b.balance, 2)))
+    return {"ok": True}
+
+
+@app.delete("/api/accounts/{account_id}/balances/{day}")
+def delete_balance(account_id: int, day: str):
+    with db.connect() as con:
+        con.execute("DELETE FROM balances WHERE account_id = ? AND date = ?", (account_id, day))
     return {"ok": True}

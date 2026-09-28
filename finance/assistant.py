@@ -39,7 +39,8 @@ Snapshot of their finances:
 # ---------- data helpers ----------
 
 def _months_with_data(con) -> list[str]:
-    return [r[0] for r in con.execute("SELECT DISTINCT substr(date, 1, 7) m FROM transactions ORDER BY m")]
+    return [r[0] for r in con.execute("SELECT DISTINCT substr(date, 1, 7) m FROM transactions "
+                                      f"WHERE account_id IN {db.BUDGET_ACCOUNTS} ORDER BY m")]
 
 
 def overview(con: sqlite3.Connection) -> str:
@@ -51,10 +52,12 @@ def overview(con: sqlite3.Connection) -> str:
     kinds = {r["id"]: r for r in db.categories(con)}
     budgets = {r["category_id"]: r["monthly_amount"] for r in con.execute("SELECT * FROM budgets")}
     avg = {r[0]: (r[1] or 0) / len(last3) for r in con.execute(
-        f"SELECT category_id, sum(amount) FROM transactions WHERE substr(date, 1, 7) IN ({marks}) GROUP BY 1", last3)}
+        f"SELECT category_id, sum(amount) FROM transactions WHERE substr(date, 1, 7) IN ({marks}) "
+        f"AND account_id IN {db.BUDGET_ACCOUNTS} GROUP BY 1", last3)}
     this_month = date.today().strftime("%Y-%m")
     mtd = {r[0]: r[1] or 0 for r in con.execute(
-        "SELECT category_id, sum(amount) FROM transactions WHERE date LIKE ? GROUP BY 1", (f"{this_month}-%",))}
+        f"SELECT category_id, sum(amount) FROM transactions WHERE date LIKE ? AND account_id IN {db.BUDGET_ACCOUNTS} "
+        "GROUP BY 1", (f"{this_month}-%",))}
     income = sum(v for k, v in avg.items() if k in kinds and kinds[k]["kind"] == "income")
     spend = -sum(v for k, v in avg.items() if k in kinds and kinds[k]["kind"] == "expense")
     lines = [f"Data covers {months[0]} to {months[-1]}. Averages below are over {', '.join(last3)}.",
@@ -66,11 +69,15 @@ def overview(con: sqlite3.Connection) -> str:
         b = budgets.get(cid)
         lines.append(f"- {c['name']}: ${-avg.get(cid, 0):,.0f} | ${-mtd.get(cid, 0):,.0f} | "
                      + (f"${b:,.0f}" if b is not None else "no budget"))
-    unc = con.execute("SELECT count(*) FROM transactions WHERE category_id IS NULL").fetchone()[0]
+    unc = con.execute("SELECT count(*) FROM transactions WHERE category_id IS NULL "
+                      f"AND account_id IN {db.BUDGET_ACCOUNTS}").fetchone()[0]
     if unc:
         lines.append(f"{unc} transactions are uncategorized.")
-    accts = [r["name"] for r in con.execute("SELECT name FROM accounts ORDER BY name")]
-    lines.append("Accounts: " + ", ".join(accts))
+    lines.append("Accounts (retirement and investment accounts are not part of the budget figures above):")
+    for a in con.execute("SELECT id, name, kind FROM accounts ORDER BY kind, name"):
+        b = con.execute("SELECT date, balance FROM balances WHERE account_id = ? ORDER BY date DESC LIMIT 1",
+                        (a["id"],)).fetchone()
+        lines.append(f"- {a['name']} ({a['kind']})" + (f": balance ${b['balance']:,.0f} as of {b['date']}" if b else ""))
     gl = goals.list_goals(con)
     if gl:
         lines.append("Goals:")
@@ -101,7 +108,8 @@ def t_monthly_spending(con, category: str | None = None, months: int = 6) -> dic
         return {"months": []}
     marks = ",".join("?" * len(recent))
     sql = (f"SELECT substr(t.date, 1, 7) m, c.name, sum(t.amount) FROM transactions t JOIN categories c "
-           f"ON c.id = t.category_id WHERE substr(t.date, 1, 7) IN ({marks}) AND c.kind = 'expense'")
+           f"ON c.id = t.category_id WHERE substr(t.date, 1, 7) IN ({marks}) AND c.kind = 'expense' "
+           f"AND t.account_id IN {db.BUDGET_ACCOUNTS}")
     args: list = list(recent)
     if category:
         cid = _category_id(con, category)
@@ -140,13 +148,32 @@ def t_top_merchants(con, months: int = 3, category: str | None = None) -> dict:
         return {"merchants": []}
     marks = ",".join("?" * len(recent))
     sql = (f"SELECT t.merchant, count(*) n, sum(t.amount) total FROM transactions t JOIN categories c "
-           f"ON c.id = t.category_id WHERE substr(t.date, 1, 7) IN ({marks}) AND c.kind = 'expense'")
+           f"ON c.id = t.category_id WHERE substr(t.date, 1, 7) IN ({marks}) AND c.kind = 'expense' "
+           f"AND t.account_id IN {db.BUDGET_ACCOUNTS}")
     args: list = list(recent)
     if category:
         sql += " AND c.id = ?"
         args.append(_category_id(con, category))
     rows = con.execute(sql + " GROUP BY 1 ORDER BY total LIMIT 15", args)
     return {"months": recent, "merchants": [{"merchant": m, "count": n, "spent": round(-t, 2)} for m, n, t in rows]}
+
+
+def t_account_balances(con, account: str | None = None) -> dict:
+    sql = "SELECT a.name, a.kind, b.date, b.balance FROM balances b JOIN accounts a ON a.id = b.account_id"
+    args: list = []
+    if account:
+        sql += " WHERE lower(a.name) LIKE lower(?)"
+        args.append(f"%{account}%")
+    out: dict = {}
+    for r in con.execute(sql + " ORDER BY a.name, b.date", args):
+        out.setdefault(r["name"], {"kind": r["kind"], "balances": []})["balances"].append([r["date"], r["balance"]])
+    for v in out.values():
+        pts = v["balances"]
+        v["latest"] = pts[-1]
+        if len(pts) > 24:          # keep the reply small: first, every few, last
+            step = len(pts) // 20 + 1
+            v["balances"] = pts[:1] + pts[1:-1:step] + pts[-1:]
+    return {"accounts": out} if out else {"note": "No balances recorded yet."}
 
 
 # ---------- proposals (never applied here) ----------
@@ -233,6 +260,8 @@ TOOLS = [
         {"text": S, "category": S, "month": S, "limit": I}),
     _fn("top_merchants", "Merchants with the most spending over recent months, optionally within one category.",
         {"months": I, "category": S}),
+    _fn("account_balances", "Balance history for accounts (from statements), e.g. a 401(k) or IRA over time.",
+        {"account": dict(S, description="Optional part of an account name")}),
     _fn("propose_goal", "Suggest saving a new savings goal. The user must accept it in the app.",
         {"name": S, "target_amount": N, "target_date": dict(S, description="YYYY-MM or YYYY-MM-DD, optional"),
          "saved_so_far": dict(N, description="Already saved toward it, default 0"),
@@ -247,7 +276,7 @@ TOOLS = [
          "reason": S}, ["changes"]),
 ]
 HANDLERS = {"monthly_spending": t_monthly_spending, "search_transactions": t_search_transactions,
-            "top_merchants": t_top_merchants, "propose_goal": p_goal, "propose_goal_update": p_goal_update,
+            "top_merchants": t_top_merchants, "account_balances": t_account_balances, "propose_goal": p_goal, "propose_goal_update": p_goal_update,
             "propose_budget_changes": p_budgets}
 
 

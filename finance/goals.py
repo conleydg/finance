@@ -14,7 +14,7 @@ def _months_between(a: date, b: date) -> float:
 
 
 def _add_months(d: date, months: float) -> date:
-    whole = int(math.ceil(months))
+    whole = int(math.ceil(months)) if months >= 0 else int(math.floor(months))
     y, m = divmod(d.month - 1 + whole, 12)
     return date(d.year + y, m + 1, min(d.day, 28))
 
@@ -43,7 +43,17 @@ def progress(con: sqlite3.Connection, g: dict) -> dict:
     today = date.today()
     contributed = 0.0
     pace = None
-    if g.get("account_id"):
+    has_balances = g.get("account_id") and con.execute(
+        "SELECT count(*) FROM balances WHERE account_id = ?", (g["account_id"],)).fetchone()[0] >= 2
+    if has_balances:
+        # Investment-style accounts: growth in the account's balance since the goal was set.
+        from .accounts import balance_on
+        start = balance_on(con, g["account_id"], g["start_date"]) or 0.0
+        latest = balance_on(con, g["account_id"], today.isoformat()) or start
+        contributed = latest - start
+        back = balance_on(con, g["account_id"], _add_months(today, -3).isoformat())
+        pace = (latest - back) / 3 if back is not None else None
+    elif g.get("account_id"):
         contributed = con.execute(
             "SELECT coalesce(sum(amount), 0) FROM transactions WHERE account_id = ? AND date >= ?",
             (g["account_id"], g["start_date"])).fetchone()[0]

@@ -61,8 +61,8 @@ def month_starts(n: int) -> list[date]:
 
 
 def day_in(month: date, day: int) -> date:
-    nxt = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
-    return min(month.replace(day=day), nxt - timedelta(days=1))
+    last = (month.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    return month.replace(day=min(day, last.day))
 
 
 def build() -> list[tuple[str, str, float, str]]:
@@ -109,13 +109,43 @@ def build() -> list[tuple[str, str, float, str]]:
     return rows
 
 
+def retirement(con, cats) -> int:
+    """Two years of a made-up 401(k): contributions, match, dividends, fees and month-end balances."""
+    aid = db.account_id(con, "Demo 401(k)", "retirement")
+    imp = con.execute("INSERT INTO imports(filename, account_id, kind, parser, rows_found, rows_added) "
+                      "VALUES ('demo-401k.pdf', ?, 'pdf', 'demo', 0, 0)", (aid,)).lastrowid
+    bal, rows = 38000.0, []
+    today = date.today()
+    for month in month_starts(24):
+        for d in (15, 28):
+            day = day_in(month, d)
+            if day <= today:
+                rows += [(day, "EE Contribution (Pre-Tax)", 480.00), (day, "ER Match", 240.00)]
+                bal += 720
+        if month.month in (3, 6, 9, 12):
+            div = round(bal * 0.004, 2)
+            rows += [(day_in(month, 30), "Dividend Reinvestment", div), (day_in(month, 30), "Plan Admin Fee", -12.50)]
+            bal += div - 12.5
+        bal *= 1 + rng.gauss(0.006, 0.025)           # market moves
+        end = day_in(month, 31)
+        if end < today:
+            con.execute("INSERT INTO balances(account_id, date, balance, import_id, source) VALUES (?, ?, ?, ?, 'statement')",
+                        (aid, end.isoformat(), round(bal, 2), imp))
+    txns = [importers.Txn(d.isoformat(), desc, amt) for d, desc, amt in rows]
+    for t, fp in zip(txns, importers.fingerprints(aid, txns)):
+        con.execute("INSERT INTO transactions(account_id, import_id, date, description, merchant, amount, fingerprint) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)", (aid, imp, t.date, t.description, importers.merchant_key(t.description),
+                                                     t.amount, fp))
+    return len(txns)
+
+
 def main() -> None:
     # This wipes the database it points at, so refuse anything but the demo folder.
     if db.DATA_DIR.name != "data-demo":
         raise SystemExit(f"Refusing to seed {db.DATA_DIR}: demo data only goes in a folder named data-demo")
     db.init()
     with db.connect() as con:
-        for t in ("transactions", "imports", "rules", "budgets"):
+        for t in ("transactions", "balances", "imports", "rules", "budgets"):
             con.execute(f"DELETE FROM {t}")
         cats = {c["name"]: c["id"] for c in db.categories(con)}
         rows = build()
@@ -134,6 +164,9 @@ def main() -> None:
                             (aid, imp, d, desc, importers.merchant_key(desc), amt,
                              cats[cat] if cat else None, "model" if cat else None, fp))
         con.executemany("INSERT INTO budgets VALUES (?, ?)", [(cats[k], v) for k, v in BUDGETS.items()])
+        con.execute("UPDATE accounts SET kind = 'credit' WHERE name = 'Demo Card'")
+        con.execute("UPDATE accounts SET kind = 'savings' WHERE name = 'Demo Savings'")
+        retirement(con, cats)
         apply_rules(con)
         n = con.execute("SELECT count(*) FROM transactions").fetchone()[0]
     print(f"Demo database ready: {n} made-up transactions over {MONTHS} months at {db.DB_PATH}")

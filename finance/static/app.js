@@ -10,6 +10,9 @@ const monthName = (m) => new Date(m + "-15").toLocaleDateString(undefined, { mon
 const json = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 let categories = [];
+let knownAccounts = {};
+const KINDS = { checking: "Checking", savings: "Savings", credit: "Credit card", retirement: "Retirement (401k, IRA)", investment: "Investment / brokerage" };
+const kindOptions = (sel) => Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${v}</option>`).join("");
 let months = [];
 
 // ---------- tabs ----------
@@ -19,7 +22,8 @@ function showTab(name) {
   document.querySelectorAll(".sidebar nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll("main > section").forEach((s) => (s.hidden = s.id !== "tab-" + name));
   try { localStorage.setItem("tab", name); } catch {}
-  ({ budget: loadBudget, goals: loadGoals, ask: loadChat, transactions: loadTransactions, import: loadImports })[name]();
+  ({ budget: loadBudget, goals: loadGoals, accounts: loadAccounts, ask: loadChat, transactions: loadTransactions,
+     import: loadImports })[name]();
 }
 
 // ---------- shared ----------
@@ -31,6 +35,7 @@ async function loadStatus() {
   $("#demo-badge").hidden = !s.demo;
   if (s.demo) document.title = "Finance (demo)";
   $("#accounts").innerHTML = s.accounts.map((a) => `<option value="${esc(a.name)}">`).join("");
+  knownAccounts = Object.fromEntries(s.accounts.map((a) => [a.name.toLowerCase(), a.kind]));
   return s;
 }
 async function loadMeta() {
@@ -176,50 +181,181 @@ $("#recat").onclick = async () => {
 function flash(msg) { $("#tx-summary").textContent = msg; }
 
 // ---------- import ----------
-$("#import-form").onsubmit = async (e) => {
+let queue = [];   // [{file, account, kind}]
+
+function addFiles(files) {
+  const ok = [...files].filter((f) => /\.(csv|pdf|txt)$/i.test(f.name));
+  if (!ok.length) return alert("Only CSV and PDF statements can be imported.");
+  const acct = $("#all-account").value.trim();
+  for (const f of ok) queue.push({ file: f, account: acct, kind: kindFor(acct) || $("#all-kind").value });
+  renderQueue();
+}
+const kindFor = (name) => knownAccounts[(name || "").trim().toLowerCase()];
+
+function renderQueue() {
+  $("#queue").hidden = !queue.length;
+  $("#queue-table tbody").innerHTML = queue.map((q, i) => `<tr>
+    <td title="${esc(q.file.name)}">${esc(q.file.name)}</td>
+    <td><input data-qa="${i}" list="accounts" value="${esc(q.account)}" placeholder="Account name" aria-label="Account for ${esc(q.file.name)}"></td>
+    <td><select data-qk="${i}" aria-label="Account type">${kindOptions(q.kind)}</select></td>
+    <td><button class="linkish neg" data-qx="${i}" aria-label="Remove ${esc(q.file.name)}">Remove</button></td></tr>`).join("");
+  document.querySelectorAll("[data-qa]").forEach((el) => el.oninput = () => {
+    const q = queue[el.dataset.qa]; q.account = el.value;
+    const k = kindFor(el.value);
+    if (k) { q.kind = k; el.closest("tr").querySelector("select").value = k; }
+  });
+  document.querySelectorAll("[data-qk]").forEach((el) => el.onchange = () => (queue[el.dataset.qk].kind = el.value));
+  document.querySelectorAll("[data-qx]").forEach((el) => el.onclick = () => { queue.splice(+el.dataset.qx, 1); renderQueue(); });
+}
+
+$("#all-kind").innerHTML = kindOptions("checking");
+$("#all-account").oninput = () => {
+  const k = kindFor($("#all-account").value);
+  if (k) $("#all-kind").value = k;
+  queue.forEach((q) => { q.account = $("#all-account").value; q.kind = $("#all-kind").value; });
+  renderQueue();
+};
+$("#all-kind").onchange = () => { queue.forEach((q) => (q.kind = $("#all-kind").value)); renderQueue(); };
+$("#file-input").onchange = (e) => { addFiles(e.target.files); e.target.value = ""; };
+$("#queue-clear").onclick = () => { queue = []; renderQueue(); };
+
+// Drag and drop anywhere in the window; never let a dropped file navigate the page away.
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+window.addEventListener("dragenter", (e) => { if (hasFiles(e)) { dragDepth++; $("#drop-overlay").hidden = false; } });
+window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("#drop-overlay").hidden = true; } });
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => {
   e.preventDefault();
-  const form = e.target;
-  const files = [...form.file.files];
-  const btn = $("button[type=submit]", form); btn.disabled = true;
-  for (const f of files) {
+  dragDepth = 0; $("#drop-overlay").hidden = true;
+  if (!e.dataTransfer?.files?.length) return;
+  if ($("#tab-import").hidden) showTab("import");
+  addFiles(e.dataTransfer.files);
+});
+
+function describe(job, name) {
+  const c = job.categorize || {};
+  const bits = [`found ${job.found} transactions, added ${job.added}`];
+  if (job.skipped) bits.push(`skipped ${job.skipped} already imported`);
+  if (job.flipped) bits.push("flipped signs (purchases were positive)");
+  if (job.dropped) bits.push(`ignored ${job.dropped} rows the model read that weren't on the page`);
+  let html = `<b>${esc(name)}</b>: ${bits.join(", ")}.`;
+  if (job.period_start || job.period_end) html += ` Period ${job.period_start || "?"} to ${job.period_end || "?"}.`;
+  if (job.ending_balance != null) html += ` Ending balance ${money(job.ending_balance)}.`;
+  if (job.balances_added || job.balances_confirmed)
+    html += ` Balance history: ${job.balances_added} new point${job.balances_added === 1 ? "" : "s"}` +
+      (job.balances_confirmed ? `, ${job.balances_confirmed} already known` : "") + ".";
+  if (job.account_kind === "retirement" || job.account_kind === "investment") html += " Kept out of the budget.";
+  else html += ` Categorized ${c.by_rule || 0} by your rules and ${c.by_model || 0} by the local model.`;
+  if (c.error) html += ` <span class="neg">${esc(c.error)}</span>`;
+  const notes = [...(job.skipped_examples || []).map((x) => `Skipped as overlap: ${esc(x)}`),
+                 ...(job.balance_conflicts || []).map((x) => `<span class="neg">Balance mismatch ${esc(x)}</span>`)];
+  if (notes.length) html += `<ul>${notes.map((n) => `<li>${n}</li>`).join("")}</ul>`;
+  return html;
+}
+
+$("#queue-go").onclick = async () => {
+  const missing = queue.filter((q) => !q.account.trim());
+  if (missing.length) return alert(`Give every file an account (${missing.length} missing).`);
+  const btn = $("#queue-go"); btn.disabled = true;
+  // Oldest statements first reads most naturally in the log; order doesn't affect the result.
+  const items = queue.splice(0);
+  renderQueue();
+  for (const q of items) {
     const line = document.createElement("div");
     line.className = "log-line";
     $("#import-log").prepend(line);
     const fd = new FormData();
-    fd.append("file", f); fd.append("account", form.account.value); fd.append("sign", form.sign.value);
+    fd.append("file", q.file); fd.append("account", q.account.trim()); fd.append("sign", $("#all-sign").value);
+    fd.append("kind", q.kind);
     try {
       const job = await pollJob(await api("/api/import", { method: "POST", body: fd }),
-        (j) => (line.innerHTML = `<b>${esc(f.name)}</b>: ${esc(j.message || "")}`));
-      if (job.status === "error") { line.innerHTML = `<b>${esc(f.name)}</b>: <span class="neg">${esc(job.message)}</span>`; continue; }
-      const c = job.categorize || {};
-      line.innerHTML = `<b>${esc(f.name)}</b>: found ${job.found}, added ${job.added} new` +
-        (job.found > job.added ? ` (${job.found - job.added} already imported)` : "") +
-        (job.flipped ? ", flipped signs (purchases were positive)" : "") +
-        (job.dropped ? `, skipped ${job.dropped} rows the model returned that weren't on the page` : "") +
-        `. Categorized ${c.by_rule || 0} by your rules and ${c.by_model || 0} by the local model.` +
-        (c.error ? ` <span class="neg">${esc(c.error)}</span>` : "") +
-        (job.months?.length ? ` Months: ${job.months.join(", ")}.` : "");
+        (j) => (line.innerHTML = `<b>${esc(q.file.name)}</b>: ${esc(j.message || "")}`));
+      line.innerHTML = job.status === "error"
+        ? `<b>${esc(q.file.name)}</b>: <span class="neg">${esc(job.message)}</span>` : describe(job, q.file.name);
     } catch (err) {
-      line.innerHTML = `<b>${esc(f.name)}</b>: <span class="neg">${esc(err.message)}</span>`;
+      line.innerHTML = `<b>${esc(q.file.name)}</b>: <span class="neg">${esc(err.message)}</span>`;
     }
+    await loadStatus();   // so the next file's account type is known
   }
-  btn.disabled = false; form.file.value = "";
-  await Promise.all([loadMeta(), loadStatus()]);
+  btn.disabled = false;
+  await loadMeta();
   loadImports();
 };
 
 async function loadImports() {
   const rows = await api("/api/imports");
   $("#imports-table tbody").innerHTML = rows.map((r) => `<tr>
-    <td>${r.created_at.slice(0, 16)}</td><td>${esc(r.filename)}</td><td>${esc(r.account)}</td><td class="muted">${r.parser}</td>
-    <td class="num">${r.rows_found}</td><td class="num">${r.rows_added ?? ""}</td>
+    <td>${r.created_at.slice(0, 16)}</td><td>${esc(r.filename)}</td><td>${esc(r.account)}</td>
+    <td class="muted">${r.period_start && r.period_end ? `${r.period_start} to ${r.period_end}` : ""}</td>
+    <td class="num">${r.rows_found}</td><td class="num">${r.rows_added ?? ""}</td><td class="num muted">${r.rows_skipped || ""}</td>
     <td><button class="linkish neg" data-del="${r.id}">Remove</button></td></tr>`).join("") ||
-    `<tr><td colspan="7" class="muted">Nothing imported yet.</td></tr>`;
+    `<tr><td colspan="8" class="muted">Nothing imported yet.</td></tr>`;
   document.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
-    if (!confirm("Remove this import and the transactions it added?")) return;
+    if (!confirm("Remove this import, the transactions it added and its balances?")) return;
     await api(`/api/imports/${b.dataset.del}`, { method: "DELETE" });
     await loadMeta(); loadImports();
   });
+}
+
+// ---------- accounts ----------
+function sparkline(hist) {
+  if (hist.length < 2) return "";
+  const w = 300, h = 64, pad = 4;
+  const xs = hist.map((p) => new Date(p.date).getTime()), ys = hist.map((p) => p.balance);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const X = (x) => pad + ((x - x0) / (x1 - x0 || 1)) * (w - 2 * pad);
+  const Y = (y) => h - pad - ((y - y0) / (y1 - y0 || 1)) * (h - 2 * pad);
+  const pts = hist.map((p, i) => `${X(xs[i]).toFixed(1)},${Y(ys[i]).toFixed(1)}`);
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Balance from ${money(ys[0])} to ${money(ys.at(-1))}">
+    <path class="spark-fill" d="M${pts[0]} L${pts.join(" L")} L${X(x1).toFixed(1)},${h} L${X(x0).toFixed(1)},${h} Z"></path>
+    <polyline class="spark" points="${pts.join(" ")}"></polyline></svg>`;
+}
+
+async function loadAccounts() {
+  const list = await api("/api/accounts");
+  const total = (kinds) => list.filter((a) => kinds.includes(a.kind) && a.latest).reduce((s, a) => s + a.latest.balance, 0);
+  const tiles = [["Retirement", ["retirement"]], ["Investments", ["investment"]], ["Cash and savings", ["checking", "savings"]]]
+    .filter(([, k]) => list.some((a) => k.includes(a.kind) && a.latest));
+  $("#acct-tiles").innerHTML = tiles.map(([label, k]) =>
+    `<div class="card tile"><span>${label}</span><strong>${money(total(k))}</strong></div>`).join("");
+  $("#acct-list").innerHTML = list.map((a) => {
+    const l = a.latest, first = a.history[0];
+    const change = l && first && a.history.length > 1 ? l.balance - first.balance : null;
+    const facts = [];
+    if (change != null) facts.push(`${change >= 0 ? "Up" : "Down"} ${money(Math.abs(change))} since ${niceDate(first.date)}`);
+    if (a.transactions) facts.push(`${a.transactions} transactions, ${a.first_date} to ${a.last_date}`);
+    if (!a.in_budget && a.in_12m) facts.push(`${money(a.in_12m)} in over the last 12 months (contributions, dividends)`);
+    return `<div class="acct">
+      <div class="acct-top"><span class="acct-name" title="${esc(a.name)}">${esc(a.name)}</span>
+        <select data-kind="${a.id}" aria-label="Type of ${esc(a.name)}">${kindOptions(a.kind)}</select></div>
+      <div class="acct-bal">${l ? money(l.balance) : "No balance yet"} ${l ? `<span>as of ${l.date}</span>` : ""}</div>
+      ${sparkline(a.history)}
+      <div class="acct-facts">${facts.map((f) => `<span>${f}</span>`).join("")}${a.in_budget ? "" : `<span class="tag">Not in budget</span>`}</div>
+      <div class="acct-actions"><button class="linkish" data-bal="${a.id}">Add a balance</button></div>
+    </div>`;
+  }).join("") || `<div class="env-empty">No accounts yet. Import a statement to create one.</div>`;
+  document.querySelectorAll("[data-kind]").forEach((el) => el.onchange = async () => {
+    await api(`/api/accounts/${el.dataset.kind}`, json("PATCH", { kind: el.value }));
+    await loadStatus(); loadAccounts();
+  });
+  document.querySelectorAll("[data-bal]").forEach((el) => el.onclick = () => addBalance(list.find((a) => a.id == el.dataset.bal)));
+}
+
+function addBalance(a) {
+  const dlg = $("#balance-dialog");
+  $("#bal-title").textContent = `Balance for ${a.name}`;
+  $("#bal-date").value = new Date().toISOString().slice(0, 10);
+  $("#bal-amount").value = "";
+  dlg.returnValue = "";
+  dlg.onclose = async () => {
+    if (dlg.returnValue !== "save") return;
+    const n = parseFloat($("#bal-amount").value.replace(/[$,]/g, ""));
+    if (isNaN(n)) return alert("Enter a number");
+    await api(`/api/accounts/${a.id}/balances`, json("POST", { date: $("#bal-date").value, balance: n }));
+    loadAccounts();
+  };
+  dlg.showModal();
 }
 
 // ---------- goals ----------

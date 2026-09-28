@@ -80,12 +80,50 @@ def make_pdf(path: Path) -> None:
     c.save()
 
 
+# Two overlapping 401(k) statements: Q2, and June to August. June is in both, worded differently.
+K401_A = ("401k_2026Q2.pdf", "Statement Period: 04/01/2026 - 06/30/2026", "41,210.55", "45,902.10", [
+    ("04/15/2026", "Employee Contribution Pre-Tax", "480.00"), ("04/15/2026", "Employer Match", "240.00"),
+    ("04/30/2026", "Employee Contribution Pre-Tax", "480.00"), ("04/30/2026", "Employer Match", "240.00"),
+    ("05/15/2026", "Employee Contribution Pre-Tax", "480.00"), ("05/15/2026", "Employer Match", "240.00"),
+    ("05/29/2026", "Employee Contribution Pre-Tax", "480.00"), ("05/29/2026", "Employer Match", "240.00"),
+    ("06/15/2026", "Employee Contribution Pre-Tax", "480.00"), ("06/15/2026", "Employer Match", "240.00"),
+    ("06/30/2026", "Dividends Reinvested", "112.37"), ("06/30/2026", "Recordkeeping Fee", "-12.50"),
+])
+K401_B = ("401k_2026JunAug.pdf", "Statement Period: 06/01/2026 - 08/31/2026", "44,610.20", "49,120.33", [
+    ("06/15/2026", "EE Contribution (Pre-Tax)", "480.00"), ("06/15/2026", "ER Match", "240.00"),
+    ("06/30/2026", "Dividend Reinvestment", "112.37"), ("06/30/2026", "Plan Admin Fee", "-12.50"),
+    ("07/15/2026", "EE Contribution (Pre-Tax)", "480.00"), ("07/15/2026", "ER Match", "240.00"),
+    ("07/31/2026", "EE Contribution (Pre-Tax)", "480.00"), ("07/31/2026", "ER Match", "240.00"),
+    ("08/14/2026", "EE Contribution (Pre-Tax)", "480.00"), ("08/14/2026", "ER Match", "240.00"),
+    ("08/28/2026", "EE Contribution (Pre-Tax)", "480.00"), ("08/28/2026", "ER Match", "240.00"),
+])
+
+
+def make_401k_pdf(path: Path, period: str, begin: str, end: str, rows) -> None:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    c = canvas.Canvas(str(path), pagesize=letter)
+    y = 740
+    for line in ["Example Retirement Services", "Example Corp 401(k) Plan", period,
+                 f"Beginning Balance ${begin}", f"Ending Balance ${end}", "", "ACCOUNT ACTIVITY"]:
+        c.drawString(50, y, line)
+        y -= 18
+    for d, desc, amt in rows:
+        c.drawString(50, y, d)
+        c.drawString(140, y, desc)
+        c.drawRightString(540, y, amt)
+        y -= 18
+    c.save()
+
+
 def main() -> None:
     SAMPLES.mkdir(exist_ok=True)
     (SAMPLES / "chase_checking.csv").write_text(CHASE_CHECKING)
     (SAMPLES / "amex.csv").write_text(AMEX)
     (SAMPLES / "bofa_savings.csv").write_text(BOFA_SAVINGS)
     make_pdf(SAMPLES / "card_statement.pdf")
+    for name, period, begin, end, rows in (K401_A, K401_B):
+        make_401k_pdf(SAMPLES / name, period, begin, end, rows)
 
 
 if __name__ == "__main__":
