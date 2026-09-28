@@ -113,11 +113,51 @@ dialog h2 { font: 600 20px var(--display); }
 .dialog-actions { display: flex; gap: 8px; margin-top: 8px; }
 .spacer { flex-grow: 1; }
 
+/* goals */
+.push-right { margin-left: auto; }
+.topline h1 { margin: 0; }
+.goals { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.goal { background: var(--card); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 8px; --c: var(--accent); }
+.goal.behind { --c: var(--near); } .goal.done { --c: var(--pos); }
+.goal-top { display: flex; align-items: baseline; gap: 8px; }
+.goal-name { font-weight: 700; font-size: 17px; }
+.goal-top .linkish { margin-left: auto; font-size: 13px; }
+.goal-amt { font: 600 28px/1.2 var(--display); font-variant-numeric: tabular-nums; }
+.goal-amt span { font: 500 15px -apple-system, sans-serif; color: var(--muted); }
+.goal .env-bar div { background: var(--c); }
+.goal-state { font-size: 13px; font-weight: 600; color: var(--c); }
+.goal-facts { font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.goal-empty { grid-column: 1 / -1; }
+
+/* ask */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.ask { max-width: 820px !important; }
+.chat { display: flex; flex-direction: column; gap: 14px; }
+.msg { max-width: 85%; padding: 12px 16px; border-radius: 16px; line-height: 1.5; }
+.msg p { margin: 0 0 8px; } .msg p:last-child { margin: 0; }
+.msg ul { margin: 4px 0 8px; padding-left: 20px; }
+.msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+.msg.assistant { align-self: flex-start; background: var(--card); border-bottom-left-radius: 4px; }
+.msg.thinking { color: var(--muted); }
+.proposal { align-self: flex-start; width: min(520px, 100%); background: var(--card); border: 2px solid var(--accent);
+            border-radius: 16px; padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; }
+.proposal.accepted { border-color: var(--pos); } .proposal.dismissed { border-color: var(--line); opacity: .7; }
+.proposal-kind { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.proposal-title { font-weight: 700; }
+.proposal table { border: 0; }
+.proposal td { padding: 4px 0; border: 0; }
+.proposal-actions { display: flex; gap: 8px; align-items: center; }
+.proposal-done { font-size: 13px; font-weight: 600; }
+.ask-form { display: flex; gap: 8px; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding: 8px 0; }
+.ask-form textarea { flex-grow: 1; resize: none; min-height: 48px; max-height: 200px; padding: 12px 14px; border: 1px solid var(--line);
+                     border-radius: 14px; background: var(--card); color: var(--text); font: inherit; }
+.ask-form .btn { min-height: 48px; }
+
 @media (max-width: 760px) {
   body { flex-direction: column; }
   .sidebar { width: auto; height: auto; position: static; flex-direction: row; align-items: center; padding: 12px 16px; flex-wrap: wrap; }
   .brand { padding: 0 8px 0 0; }
-  .sidebar nav { flex-direction: row; }
+  .sidebar nav { flex-direction: row; flex-wrap: wrap; }
   .soon, .side-foot { display: none; }
   main { padding: 20px 16px 40px; }
   .left-total { margin-left: 0; align-items: flex-start; width: 100%; }

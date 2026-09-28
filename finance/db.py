@@ -72,6 +72,31 @@ CREATE TABLE IF NOT EXISTS budgets (
     category_id INTEGER PRIMARY KEY REFERENCES categories(id),
     monthly_amount REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS goals (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    target_amount REAL NOT NULL,
+    target_date TEXT,                -- YYYY-MM-DD, optional
+    saved_start REAL NOT NULL DEFAULT 0,   -- already saved when the goal was set
+    start_date TEXT NOT NULL,        -- YYYY-MM-DD
+    account_id INTEGER REFERENCES accounts(id),  -- money into this account counts toward it
+    status TEXT NOT NULL DEFAULT 'active',        -- active | done | archived
+    note TEXT
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY,
+    role TEXT NOT NULL,              -- user | assistant
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS proposals (
+    id INTEGER PRIMARY KEY,
+    message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,              -- goal | goal_update | budgets
+    payload TEXT NOT NULL,           -- JSON
+    status TEXT NOT NULL DEFAULT 'pending',       -- pending | accepted | dismissed
+    created_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT

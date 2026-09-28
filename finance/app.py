@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import categorize, db, importers, llm
+from . import assistant, categorize, db, goals, importers, llm
 
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="Finance", docs_url=None, redoc_url=None)
@@ -254,4 +254,84 @@ def set_budget(category_id: int, body: BudgetSet):
         else:
             con.execute("INSERT INTO budgets VALUES (?, ?) ON CONFLICT(category_id) DO UPDATE "
                         "SET monthly_amount = excluded.monthly_amount", (category_id, body.monthly_amount))
+    return {"ok": True}
+
+
+# ---------- Ask (chat) ----------
+
+class ChatIn(BaseModel):
+    message: str
+
+
+@app.get("/api/chat")
+def chat_history():
+    with db.connect() as con:
+        return assistant.history(con)
+
+
+@app.post("/api/chat")
+def chat(body: ChatIn):
+    if not body.message.strip():
+        raise HTTPException(400, "Type a question")
+    if not llm.available():
+        raise HTTPException(503, f"The local model ({llm.MODEL}) isn't running")
+    return assistant.ask(body.message.strip())
+
+
+@app.delete("/api/chat")
+def clear_chat():
+    with db.connect() as con:
+        con.execute("DELETE FROM proposals WHERE status = 'pending'")
+        con.execute("UPDATE proposals SET message_id = NULL")
+        con.execute("DELETE FROM chat_messages")
+    return {"ok": True}
+
+
+@app.post("/api/proposals/{proposal_id}/{action}")
+def resolve_proposal(proposal_id: int, action: str):
+    if action not in ("accept", "dismiss"):
+        raise HTTPException(400, "accept or dismiss")
+    try:
+        return assistant.resolve(proposal_id, action == "accept")
+    except KeyError:
+        raise HTTPException(404)
+
+
+# ---------- Goals ----------
+
+@app.get("/api/goals")
+def list_goals():
+    with db.connect() as con:
+        return goals.list_goals(con)
+
+
+class GoalIn(BaseModel):
+    name: str | None = None
+    target_amount: float | None = None
+    target_date: str | None = None
+    saved_so_far: float | None = None
+    account_id: int | None = None
+    status: str | None = None
+
+
+@app.post("/api/goals")
+def add_goal(g: GoalIn):
+    if not g.name or not g.target_amount or g.target_amount <= 0:
+        raise HTTPException(400, "A goal needs a name and a positive amount")
+    with db.connect() as con:
+        gid = goals.create(con, g.name, g.target_amount, g.target_date or None, g.saved_so_far or 0, g.account_id)
+    return {"id": gid}
+
+
+@app.patch("/api/goals/{goal_id}")
+def edit_goal(goal_id: int, g: GoalIn):
+    with db.connect() as con:
+        goals.update(con, goal_id, g.model_dump(exclude_unset=True))
+    return {"ok": True}
+
+
+@app.delete("/api/goals/{goal_id}")
+def delete_goal(goal_id: int):
+    with db.connect() as con:
+        con.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
     return {"ok": True}

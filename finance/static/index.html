@@ -11,6 +11,8 @@
   <div class="brand">Finance <span id="demo-badge" hidden>Demo data</span></div>
   <nav>
     <button data-tab="budget" class="active">Budget</button>
+    <button data-tab="goals">Goals</button>
+    <button data-tab="ask">Ask</button>
     <button data-tab="transactions">Transactions</button>
     <button data-tab="import">Import</button>
   </nav>
@@ -18,7 +20,6 @@
     <div class="soon-label">Coming next</div>
     <span>Retirement</span>
     <span>College savings</span>
-    <span>Goals</span>
   </div>
   <div class="side-foot">
     <span id="model-status"></span>
@@ -51,6 +52,30 @@
       <div class="card tile"><span>Spent</span><strong id="t-spent"></strong></div>
       <div class="card tile"><span>Kept</span><strong id="t-net"></strong></div>
     </div>
+  </section>
+
+  <section id="tab-goals" hidden>
+    <div class="topline">
+      <h1>Goals</h1>
+      <button id="new-goal" class="btn primary push-right">New goal</button>
+    </div>
+    <div id="goals" class="goals"></div>
+    <p class="muted small">Progress is what you'd saved when you set the goal, plus money that has gone into its linked account since then. Goals without an account move when you update the saved amount, here or by telling Ask.</p>
+  </section>
+
+  <section id="tab-ask" hidden class="ask">
+    <div class="topline">
+      <h1>Ask</h1>
+      <button id="clear-chat" class="btn push-right">Clear chat</button>
+    </div>
+    <div id="chat" class="chat" aria-live="polite"></div>
+    <div id="starters" class="chips"></div>
+    <form id="ask-form" class="ask-form">
+      <label for="ask-input" class="sr-only">Ask about your money</label>
+      <textarea id="ask-input" rows="1" placeholder="Ask about your money, or tell me about a goal" required></textarea>
+      <button class="btn primary" type="submit">Send</button>
+    </form>
+    <p class="muted small">Answers come from the local model on this Mac using your own numbers. Suggested goals and budget changes only take effect when you accept them. This is not professional financial advice.</p>
   </section>
 
   <section id="tab-transactions" hidden>
@@ -112,6 +137,24 @@
       <button value="clear" id="bd-clear" class="btn">Remove envelope</button>
       <span class="spacer"></span>
       <button value="cancel" class="btn">Cancel</button>
+      <button value="save" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="goal-dialog">
+  <form method="dialog">
+    <h2 id="gd-title">New goal</h2>
+    <label>Name <input id="gd-name" required></label>
+    <label>Target amount <input id="gd-amount" inputmode="decimal" required></label>
+    <label>Target date (optional) <input id="gd-date" type="date"></label>
+    <label>Saved so far <input id="gd-saved" inputmode="decimal" placeholder="0"></label>
+    <label>Count deposits into this account
+      <select id="gd-account"><option value="">No account</option></select>
+    </label>
+    <div class="dialog-actions">
+      <button value="delete" id="gd-delete" class="btn">Delete goal</button>
+      <span class="spacer"></span>
+      <button value="cancel" class="btn" formnovalidate>Cancel</button>
       <button value="save" class="btn primary">Save</button>
     </div>
   </form>

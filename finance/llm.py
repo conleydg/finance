@@ -28,3 +28,14 @@ def chat_json(prompt: str, schema: dict, model: str = MODEL) -> dict:
     })
     r.raise_for_status()
     return json.loads(r.json()["message"]["content"])
+
+
+def chat(messages: list[dict], tools: list[dict] | None = None, model: str = MODEL) -> dict:
+    """One chat turn with optional tool definitions; returns Ollama's message dict."""
+    body = {"model": model, "stream": False, "think": False, "messages": messages,
+            "options": {"temperature": 0.3, "num_ctx": 16384}, "keep_alive": "10m"}
+    if tools:
+        body["tools"] = tools
+    r = httpx.post(f"{OLLAMA}/api/chat", timeout=600, json=body)
+    r.raise_for_status()
+    return r.json()["message"]
