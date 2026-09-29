@@ -94,3 +94,31 @@ def test_balance_only_statements_and_same_names(env):
         pts = [tuple(r) for r in con.execute("SELECT account_id, date, balance FROM balances ORDER BY account_id, date")]
     assert pts == [(ids["3307"], "2026-06-30", 52310.44), (ids["3307"], "2026-09-30", 53904.12),
                    (ids["9150"], "2026-06-30", 8120.00)]
+
+
+@pytest.mark.parametrize("desc,transfer", [
+    ("PAYMENT - THANK YOU", True), ("ONLINE PAYMENT - THANK YOU", True), ("CAPITAL ONE ONLINE PMT", True),
+    ("AMEX EPAYMENT ACH PMT", True), ("ONLINE TRANSFER TO SAV XXXX1234", True), ("CHASE CREDIT CRD AUTOPAY", True),
+    ("EVERSOURCE ENERGY BILL PAY", False), ("ACME CORP PAYROLL PPD ID: 123456", False),
+    ("ONLINE PAYMENT TO VERIZON", False), ("WHOLEFDS MKT #10234", False),
+])
+def test_transfer_patterns(desc, transfer):
+    from finance import categorize
+    assert categorize.is_transfer(desc) is transfer
+
+
+def test_money_out_never_counts_as_income(env):
+    from finance import app, categorize, db
+    with db.connect() as con:
+        acct = db.create_account(con, "Card", "credit")
+        cats = {c["name"]: c["id"] for c in db.categories(con)}
+        rows = [("2026-08-01", "ACME PAYROLL", 1000.0, "Income"), ("2026-08-02", "PAYMENT - THANK YOU", 500.0, "Income"),
+                ("2026-08-03", "SOME REVERSAL", -40.0, "Income"), ("2026-08-04", "COFFEE", -5.0, None)]
+        for i, (d, desc, amt, cat) in enumerate(rows):
+            con.execute("INSERT INTO transactions(account_id, date, description, merchant, amount, category_id, "
+                        "category_source, fingerprint) VALUES (?, ?, ?, ?, ?, ?, 'model', ?)",
+                        (acct, d, desc, desc, amt, cats.get(cat), str(i)))
+        categorize.apply_patterns(con)
+    b = app.budget("2026-08")
+    assert b["income"] == 1000.0                  # payment is a transfer; the reversal is no longer income
+    assert b["uncategorized"]["count"] == 2 and b["spent"] == 45.0   # uncategorized money out still counts

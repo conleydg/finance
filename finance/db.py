@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS tx_date ON transactions(date);
 CREATE TABLE IF NOT EXISTS rules (
     merchant TEXT PRIMARY KEY,
-    category_id INTEGER NOT NULL REFERENCES categories(id)
+    category_id INTEGER NOT NULL REFERENCES categories(id),
+    direction TEXT                   -- in | out: only applies to money moving the same way as the example
 );
 CREATE TABLE IF NOT EXISTS budgets (
     category_id INTEGER PRIMARY KEY REFERENCES categories(id),
@@ -146,6 +147,7 @@ MIGRATIONS = [
     ("accounts", "last4", "ALTER TABLE accounts ADD COLUMN last4 TEXT"),
     ("accounts", "subtype", "ALTER TABLE accounts ADD COLUMN subtype TEXT"),
     ("accounts", "contributing", "ALTER TABLE accounts ADD COLUMN contributing INTEGER"),
+    ("rules", "direction", "ALTER TABLE rules ADD COLUMN direction TEXT"),
 ]
 
 
@@ -190,6 +192,9 @@ def init() -> None:
                 con.execute(sql)
         con.executescript(SCHEMA)
         con.executemany("INSERT OR IGNORE INTO categories(name, kind) VALUES (?, ?)", DEFAULT_CATEGORIES)
+        # Older rules had no direction; an income rule can only ever mean money coming in.
+        con.execute("UPDATE rules SET direction = 'in' WHERE direction IS NULL AND category_id IN "
+                    "(SELECT id FROM categories WHERE kind = 'income')")
 
 
 def account_id(con: sqlite3.Connection, name: str, kind: str | None = None) -> int:

@@ -80,7 +80,7 @@ async function loadBudget() {
 
   const note = $("#uncat-note");
   note.hidden = !b.uncategorized.count;
-  note.innerHTML = `${b.uncategorized.count} uncategorized transactions (${money(b.uncategorized.amount)}) aren't counted yet. <a href="#" id="see-uncat">Review them</a>`;
+  note.innerHTML = `${b.uncategorized.count} transactions this month aren't categorized yet. Their ${money(b.uncategorized.spent)} of spending is counted under Uncategorized. <a href="#" id="see-uncat">Review them</a> or use Categorize uncategorized on the Transactions page.`;
   const seeUncat = $("#see-uncat");
   if (seeUncat) seeUncat.onclick = (e) => { e.preventDefault(); $("#tx-cat").value = "__none"; $("#tx-month").value = b.month; showTab("transactions"); };
 
@@ -105,7 +105,14 @@ async function loadBudget() {
       <div class="env-label">${rem < 0 ? "over budget" : "left"}</div>
       <div class="env-bar"><div style="width:${pct}%"></div></div>
     </button>`;
-  }).join("") || `<div class="env-empty">No spending this month yet.</div>`;
+  }).join("") + (b.uncategorized.spent ? `<button class="env over" id="env-uncat" title="Not categorized yet. Click to review.">
+      <div class="env-top"><span class="env-name">Uncategorized</span><span class="env-of">${b.uncategorized.count} transactions</span></div>
+      <div class="env-left">${money(b.uncategorized.spent)}</div>
+      <div class="env-label">spent &middot; <span class="env-set">Review</span></div>
+      <div class="env-bar"><div style="width:0"></div></div></button>` : "")
+    || `<div class="env-empty">No spending this month yet.</div>`;
+  const envUncat = $("#env-uncat");
+  if (envUncat) envUncat.onclick = () => { $("#tx-cat").value = "__none"; $("#tx-month").value = b.month; showTab("transactions"); };
 
   const idle = b.categories.filter((r) => r.budget == null && !(r.spent > 0));
   $("#loose-card").hidden = !idle.length;
@@ -126,8 +133,10 @@ async function showIncome() {
   const opts = (sel) => categories.map((c) => `<option value="${c.id}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("");
   const row = (r, counted) => `<tr><td class="nowrap">${new Date(r.date + "T12:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })}</td><td class="desc" title="${esc(r.description)}">${esc(r.description)}</td>
     <td class="muted">${esc(r.account)}</td><td class="num pos">${money(r.amount)}</td>
-    <td>${counted ? `<select data-inc="${r.id}" aria-label="Category">${opts(r.category_id)}</select>`
-      : `<span class="muted small">${esc(r.category || "Uncategorized")}</span> <button type="button" class="btn" data-count="${r.id}">Count as income</button>`}</td></tr>`;
+    <td>${counted ? `<select data-inc="${r.id}" aria-label="Category">${opts(r.category_id)}</select>` +
+        (r.looks_transfer ? ` <span class="warn small">Looks like a card payment or transfer</span>` : "")
+      : `<span class="muted small">${esc(r.looks_transfer ? "Card payment or transfer" : r.category || "Uncategorized")}</span>
+         <button type="button" class="${r.looks_transfer ? "linkish" : "btn"}" data-count="${r.id}">Count as income</button>`}</td></tr>`;
   $("#inc-counted tbody").innerHTML = inc.counted.map((r) => row(r, true)).join("") || `<tr><td class="muted">Nothing counted as income this month.</td></tr>`;
   $("#inc-other tbody").innerHTML = inc.not_counted.map((r) => row(r, false)).join("") || `<tr><td class="muted">No other money came in.</td></tr>`;
   const set = async (id, cat) => { await api(`/api/transactions/${id}`, json("PATCH", { category_id: cat, remember: true })); showIncome(); loadBudget(); };
@@ -387,7 +396,7 @@ function describe(job, name) {
     html += ` Balance history: ${job.balances_added} new point${job.balances_added === 1 ? "" : "s"}` +
       (job.balances_confirmed ? `, ${job.balances_confirmed} already known` : "") + ".";
   if (job.account_kind === "retirement" || job.account_kind === "investment") html += " Kept out of the budget.";
-  else html += ` Categorized ${c.by_rule || 0} by your rules and ${c.by_model || 0} by the local model.`;
+  else html += ` Categorized ${(c.by_pattern || 0) + (c.by_rule || 0)} by rules and ${c.by_model || 0} by the local model.`;
   if (c.error) html += ` <span class="neg">${esc(c.error)}</span>`;
   const notes = [...(job.skipped_examples || []).map((x) => `Skipped as overlap: ${esc(x)}`),
                  ...(job.balance_conflicts || []).map((x) => `<span class="neg">Balance mismatch ${esc(x)}</span>`)];

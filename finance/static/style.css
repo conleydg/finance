@@ -172,6 +172,7 @@ dialog h3 { font-size: 15px; margin: 10px 0 0; }
 dialog table { font-size: 14px; }
 dialog td { padding: 6px 8px; }
 .nowrap { white-space: nowrap; }
+.warn { color: var(--near); }
 dialog td.desc { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* dialog */

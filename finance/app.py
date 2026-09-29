@@ -15,6 +15,9 @@ STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="Finance", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 db.init()
+with db.connect() as _con:          # re-apply transfer patterns and rules so fixes reach existing data
+    categorize.apply_patterns(_con)
+    categorize.apply_rules(_con)
 
 JOBS: dict[str, dict] = {}
 
@@ -414,9 +417,10 @@ def budget(month: str | None = None):
         hist_months = con.execute(
             f"SELECT count(DISTINCT substr(date, 1, 7)) FROM transactions WHERE substr(date, 1, 7) IN "
             f"({','.join('?' * len(prev))}) AND account_id IN {db.BUDGET_ACCOUNTS}", prev).fetchone()[0] or 1
-        uncategorized = con.execute("SELECT count(*), coalesce(sum(amount), 0) FROM transactions "
-                                    f"WHERE category_id IS NULL AND date LIKE ? AND account_id IN {db.BUDGET_ACCOUNTS}",
-                                    (f"{month}-%",)).fetchone()
+        uncategorized = con.execute(
+            "SELECT count(*), coalesce(sum(amount), 0), coalesce(-sum(CASE WHEN amount < 0 THEN amount END), 0) "
+            f"FROM transactions WHERE category_id IS NULL AND date LIKE ? AND account_id IN {db.BUDGET_ACCOUNTS}",
+            (f"{month}-%",)).fetchone()
     rows, income, spent = [], 0.0, 0.0
     for cid, c in cats.items():
         net = cur.get(cid, 0.0)
@@ -430,9 +434,12 @@ def budget(month: str | None = None):
         rows.append({"category_id": cid, "category": c["name"], "spent": round(spend, 2) + 0.0,
                      "budget": budgets.get(cid), "avg3": round(avg, 2)})
     rows.sort(key=lambda r: -r["spent"])
+    # Uncategorized money out still counts as spending, so the total is never quietly low.
+    spent += uncategorized[2]
     return {"month": month, "income": round(income, 2), "spent": round(spent, 2), "net": round(income - spent, 2),
             "budgeted": round(sum(v for k, v in budgets.items() if cats.get(k, {}).get("kind") == "expense"), 2),
-            "uncategorized": {"count": uncategorized[0], "amount": round(uncategorized[1], 2)},
+            "uncategorized": {"count": uncategorized[0], "amount": round(uncategorized[1], 2),
+                              "spent": round(uncategorized[2], 2)},
             "categories": rows}
 
 
@@ -447,6 +454,8 @@ def income(month: str):
         counted = [dict(r) for r in con.execute(base + "AND c.kind = 'income' ORDER BY t.amount DESC", (f"{month}-%",))]
         other = [dict(r) for r in con.execute(
             base + "AND t.amount > 0 AND (c.kind IS NULL OR c.kind != 'income') ORDER BY t.amount DESC", (f"{month}-%",))]
+    for r in counted + other:
+        r["looks_transfer"] = categorize.is_transfer(r["description"])
     return {"month": month, "counted": counted, "not_counted": other,
             "counted_total": round(sum(r["amount"] for r in counted), 2),
             "not_counted_total": round(sum(r["amount"] for r in other), 2)}
