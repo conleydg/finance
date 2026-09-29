@@ -31,31 +31,57 @@ The demo lives in `data-demo/`, is rebuilt on every start, and shows a "Demo dat
 First-time setup:
 
 ```bash
-/opt/homebrew/bin/python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+/opt/homebrew/bin/python3.12 -m venv .venv && .venv/bin/pip install -r requirements.lock
 ```
+
+`requirements.txt` lists direct dependencies; `requirements.lock` captures their exact installed versions and transitive dependencies for Python 3.12 on Apple Silicon macOS. It includes the existing Mac app build and test dependencies. The snapshot does not pin Ollama itself or download its model. It has version pins, not artifact hashes, and has not been verified by a clean reinstall.
+
+Check package consistency without starting the app:
+
+```bash
+.venv/bin/python -m pip check
+```
+
+After intentionally changing dependencies and validating the environment, refresh the lock and review its diff:
+
+```bash
+.venv/bin/python scripts/lock_installed.py requirements.txt requirements.lock
+```
+
+The script reads installed package metadata only. It does not open the finance database or import application modules. Keep dependency updates separate from changes to personal data.
 
 The model defaults to `gemma4:26b-a4b-it-q4_K_M`; override with `FINANCE_MODEL=...`. `FINANCE_DATA=/some/dir` points at a different data folder (handy for trying things out).
 
 ## What it does
 
-**Import** (CSV or PDF, several files at once, into a named account)
-- CSV: finds the header row even under a summary block, and handles a single amount column or separate debit/credit columns. Most US bank exports work (Chase, BofA, Amex, Discover, Capital One style headers).
-- Signs: money out is negative. Card exports that list purchases as positive (Amex, Discover) are detected and flipped; you can also force it on the import form.
-- PDF: text is extracted with pdfplumber and each page is read by the local model into transactions. Any amount the model returns that doesn't literally appear on the page is dropped. If Ollama is down, a regex line parser is used instead. Scanned (image-only) PDFs aren't supported yet.
-- Re-importing the same file adds nothing; two identical purchases on the same day in one file are both kept. Any import can be removed from the Import tab.
+**Import** (drop any mix of CSV and PDF statements on the Import page)
+- The local model reads each file first and identifies the institution, account type and last four digits of the account number (checked against the text). The app matches it to an existing account and only asks what's missing: which account, whether you're still contributing, a balance's date. Nothing is saved until you press Save.
+- CSV: finds the header row even under a summary block; handles one amount column or separate debit/credit columns, and running-balance columns.
+- PDF: text is extracted with pdfplumber and each page is read by the local model. Amounts, balances and account digits the model returns must literally appear in the text. If Ollama is down, regex fallbacks are used. Scanned (image-only) PDFs aren't supported yet.
+- Signs: money out is negative. Card exports that list purchases as positive (Amex, Discover) are detected and flipped.
+- Overlapping statements are safe: rows another file of the same account already added (same date and amount) are skipped and listed. Re-importing a file adds nothing. Any import can be removed.
+- Balance-only statements ("Total account value as of ...") add a point to that account's balance history.
+
+**Accounts**
+- Types: checking, savings, credit, retirement, investment. Retirement and investment activity stays out of the budget. Names don't have to be unique; accounts are told apart by institution and account number.
+- Balance history per account from statements (ending balances), CSV running balances or manual entries, with a small chart.
 
 **Categorize**
-- Your merchant rules first, then the local model in batches of 40 for the rest.
-- Changing a transaction's category remembers it for that merchant and re-applies it to earlier transactions you haven't set by hand. Your corrections are also given to the model as examples.
-- The small tag next to each category shows where it came from: `you`, `rule` or `AI`.
-
-**Ask and Goals**
-- Ask is a chat with the local model. It looks up your numbers through read-only tools (spending by month, transaction search, top merchants) plus a snapshot of averages, budgets and goals, so answers use real figures.
-- When you mention a goal, or ask how to reach one, it suggests saving the goal or changing budgets. Suggestions appear as cards under the reply; nothing changes until you press Save goal or Apply budgets.
-- Goals track what you'd saved when you set them plus money flowing into a linked account (e.g. transfers into savings), and show the monthly amount needed and where your recent pace lands you. It won't recommend specific investments.
+- Card payments and transfers between your own accounts are recognized by pattern and counted as Transfer on both sides.
+- Then your merchant rules, then the local model in batches of 40. Money out is never counted as income.
+- Changing a category remembers it for that merchant (for money moving the same direction) and re-applies it to earlier transactions you haven't set by hand. The tag next to each category shows where it came from: `you`, `rule` or `AI`.
 
 **Budget**
-- Per month: income, spending, net, and each expense category's spend against its monthly budget (click "set"), plus a three-month average. Refunds reduce spending; transfers (card payments, moves to savings) are excluded.
+- Per month: an envelope card per category with what's left, income, spending and what you kept, and a three-month average. Refunds reduce spending; transfers are excluded; uncategorized spending still counts and has its own card.
+- Click Income to see what's counted as income and any money in that isn't, with one-click fixes.
+
+**Ask and Goals**
+- Ask is a chat with the local model. It looks up your numbers through read-only tools (spending by month, transaction search, top merchants, account balances) plus a snapshot of averages, budgets, accounts and goals.
+- When you mention a goal, or ask how to reach one, it suggests saving the goal or changing budgets. Suggestions appear as cards under the reply; nothing changes until you accept. It won't recommend specific investments.
+- Goals track what you'd saved when you set them plus money flowing into a linked account (or that account's balance growth, for retirement and investment accounts), the monthly amount needed, and where your recent pace lands you.
+
+**Diagnose**
+- `.venv/bin/python scripts/diagnose.py` prints a count-only health check (no descriptions, amounts or names) that's safe to share when something looks off.
 
 ## Tests
 
@@ -63,22 +89,12 @@ The model defaults to `gemma4:26b-a4b-it-q4_K_M`; override with `FINANCE_MODEL=.
 .venv/bin/python -m pytest -q
 ```
 
-Tests use synthetic statements generated by `tests/make_samples.py` (fake data in real banks' export shapes).
+Tests use synthetic statements generated by `tests/make_samples.py` (fake data in real banks' export shapes). Nothing in the repo contains real financial data.
 
-## Layout
+## For coding agents
 
-```
-finance/app.py         HTTP API + background import jobs
-finance/importers.py   CSV/PDF parsing, sign detection, merchant keys, dedupe
-finance/categorize.py  rules + local-model categorization
-finance/assistant.py   Ask: tools, proposals, conversation loop
-finance/goals.py       goals and progress
-finance/desktop.py     the Mac app window
-finance/llm.py         Ollama client (127.0.0.1 only)
-finance/db.py          SQLite schema
-finance/static/        the web page
-```
+See [AGENTS.md](AGENTS.md) (also loaded by Claude Code through `CLAUDE.md`): privacy rules, conventions, decisions and open items.
 
 ## Not yet
 
-Email forwarding of statements, retirement projections and college savings are planned as later pieces.
+Nightly backup to an encrypted drive, a statement anonymizer for reproducing bugs safely, retirement projections, college savings, goal-based advice, and statements by forwarded email.
